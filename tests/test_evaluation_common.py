@@ -44,6 +44,59 @@ def test_output_path_and_json(tmp_path: Path) -> None:
     }
 
 
+def test_json_serializes_callable_set_and_unknown_object(tmp_path: Path) -> None:
+    def example_function() -> None:
+        pass
+
+    class Unknown:
+        def __str__(self) -> str:
+            return "unknown-object"
+
+    path = tmp_path / "raw_results.json"
+    save_json({
+        "raw_results": {
+            "metric": 1.0,
+            "task_function": example_function,
+            "labels": {"test", "validation"},
+            "unknown": Unknown(),
+        },
+    }, path)
+    raw_results = json.loads(path.read_text(encoding="utf-8"))["raw_results"]
+    assert raw_results["metric"] == 1.0
+    assert isinstance(raw_results["task_function"], str)
+    assert raw_results["task_function"].endswith(".example_function")
+    assert set(raw_results["labels"]) == {"test", "validation"}
+    assert raw_results["unknown"] == "unknown-object"
+
+
+def test_json_preserves_existing_object_conversions(tmp_path: Path) -> None:
+    class WithDict:
+        def to_dict(self) -> dict[str, int]:
+            return {"value": 1}
+
+    class WithList:
+        def tolist(self) -> list[int]:
+            return [1, 2]
+
+    class WithItem:
+        def item(self) -> int:
+            return 3
+
+    path = tmp_path / "conversions.json"
+    save_json({
+        "path": tmp_path,
+        "dict": WithDict(),
+        "list": WithList(),
+        "scalar": WithItem(),
+    }, path)
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "path": str(tmp_path),
+        "dict": {"value": 1},
+        "list": [1, 2],
+        "scalar": 3,
+    }
+
+
 def test_shared_engine_config_and_harness_adapter() -> None:
     config = vllm_engine_config("Qwen/Qwen3-14B", max_model_len=4096, seed=7)
     assert config == {

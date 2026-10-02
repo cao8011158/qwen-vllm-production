@@ -37,13 +37,20 @@ def result_path(output_dir: Path, model_name: str) -> Path:
 def _json_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, set):
+        return list(value)
     if hasattr(value, "to_dict"):
         return value.to_dict()
     if hasattr(value, "tolist"):
         return value.tolist()
     if hasattr(value, "item"):
         return value.item()
-    raise TypeError(f"Cannot serialize {type(value).__name__} to JSON.")
+    if callable(value):
+        module = getattr(value, "__module__", None)
+        qualname = getattr(value, "__qualname__", None) or getattr(value, "__name__", None)
+        if module and qualname:
+            return f"{module}.{qualname}"
+    return str(value)
 
 
 def save_json(payload: Mapping[str, Any], path: Path) -> None:
