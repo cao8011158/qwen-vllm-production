@@ -1,0 +1,81 @@
+project:
+  name: qwen-vllm-production
+  course: 'DLBDSMTP01 - Project: From Model to Production'
+  seed: 42
+
+model:
+  model_id: Qwen/Qwen3-14B
+  revision: main
+  dtype: bfloat16
+  trust_remote_code: false
+  max_model_len: 8192
+
+compression:
+  baseline_bf16:
+    method: none
+    weight_dtype: bfloat16
+    activation_dtype: bfloat16
+    requires_calibration: false
+  int8_w8a8:
+    method: int8_w8a8
+    weight_bits: 8
+    activation_bits: 8
+    activation_scheme: null
+    requires_calibration: null
+  awq_w4a16:
+    method: awq
+    weight_bits: 4
+    activation_dtype: bfloat16
+    requires_calibration: true
+
+calibration:
+  dataset: null
+  split: null
+  num_samples: null
+  max_sequence_length: null
+
+evaluation:
+  quality:
+    perplexity: true
+    benchmarks: []
+  structured_output:
+    enabled: false
+
+serving:
+  engine: vllm
+  host: 0.0.0.0
+  port: 8000
+  gpu_memory_utilization: null
+  max_num_seqs: null
+  max_num_batched_tokens: null
+
+workloads:
+  interactive_chat:
+    input_tokens: 1024
+    output_tokens: 256
+    max_context_tokens: 8192
+  long_context:
+    input_tokens: 8192
+    output_tokens: 256
+    max_context_tokens: 8192
+
+slo:
+  quality:
+    recovery_minimum: 0.99
+  latency:
+    p95_ttft_seconds: 1.0
+    p95_tpot_ms_per_token: 50
+    p95_e2e_seconds: 15
+  reliability:
+    request_success_rate: 0.99
+    slo_attainment_rate: 0.95
+  structured_output:
+    schema_validity_rate: 1.0
+
+benchmark:
+  concurrency_levels: [1, 2, 4, 8, 16, 32, 64]
+  duration_seconds: null
+
+output:
+  results_root: results
+  compressed_model_root: outputs/compressed
