@@ -44,7 +44,7 @@ def run(config_path: Path) -> Path:
     recipe = build_awq_recipe(profile)
     model, tokenizer = load_model_and_tokenizer(get_model_config(config))
     calibration = get_calibration_config(config)
-    dataset = prepare_calibration_data(calibration, tokenizer, seed=config["project"]["seed"])
+    dataset = prepare_calibration_data(calibration, tokenizer)
     output_path = resolve_compressed_model_path(config, PROFILE_NAME, config_path.parent.parent)
 
     from llmcompressor import oneshot

@@ -1,4 +1,4 @@
-"""W8A8 INT8 pipeline, gated until the activation design is chosen."""
+"""Static W8A8 INT8 compression pipeline for a future Linux GPU run."""
 
 from __future__ import annotations
 
@@ -24,14 +24,37 @@ PROFILE_NAME = "int8_w8a8"
 
 
 def build_int8_recipe(profile: Mapping[str, Any]) -> Any:
-    """Refuse to invent a static/dynamic recipe for the selected scheme."""
-    # TODO: After choosing static or dynamic, verify an INT8-only recipe against
-    # the installed LLM Compressor API and Qwen3/vLLM compatibility. The official
-    # W8A8 example uses a weight-quantization component excluded by this project.
-    raise NotImplementedError(
-        f"No verified INT8 recipe for activation_scheme={profile['activation_scheme']!r}; "
-        "confirm the LLM Compressor API in Colab before compression."
+    """Describe per-channel INT8 weights and static per-tensor INT8 inputs."""
+    if profile.get("activation_scheme") != "static":
+        raise ValueError("int8_w8a8.activation_scheme must be static.")
+    from compressed_tensors.quantization import QuantizationScheme
+    from compressed_tensors.quantization.quant_args import (
+        QuantizationArgs,
+        QuantizationStrategy,
+        QuantizationType,
     )
+    from llmcompressor.modifiers.quantization import QuantizationModifier
+
+    # TODO: Confirm this explicit static scheme and Qwen3/vLLM runtime behavior
+    # against the installed Colab versions before a formal compression run.
+    scheme = QuantizationScheme(
+        targets=["Linear"],
+        weights=QuantizationArgs(
+            num_bits=profile["weight_bits"],
+            type=QuantizationType.INT,
+            strategy=QuantizationStrategy.CHANNEL,
+            symmetric=True,
+            dynamic=False,
+        ),
+        input_activations=QuantizationArgs(
+            num_bits=profile["activation_bits"],
+            type=QuantizationType.INT,
+            strategy=QuantizationStrategy.TENSOR,
+            symmetric=True,
+            dynamic=False,
+        ),
+    )
+    return QuantizationModifier(config_groups={"group_0": scheme}, ignore=["lm_head"])
 
 
 def run(config_path: Path) -> Path:
@@ -39,32 +62,23 @@ def run(config_path: Path) -> Path:
     config = load_config(config_path)
     validate_execution_config(config, PROFILE_NAME)
     profile = get_compression_profile(config, PROFILE_NAME)
-    recipe = build_int8_recipe(profile)  # Fail before any model or dataset download.
+    recipe = build_int8_recipe(profile)
     model, tokenizer = load_model_and_tokenizer(get_model_config(config))
     calibration = get_calibration_config(config)
-    dataset = (
-        prepare_calibration_data(calibration, tokenizer, seed=config["project"]["seed"])
-        if profile["requires_calibration"]
-        else None
-    )
+    dataset = prepare_calibration_data(calibration, tokenizer)
     output_path = resolve_compressed_model_path(config, PROFILE_NAME, config_path.parent.parent)
 
     from llmcompressor import oneshot
 
-    options: dict[str, Any] = {}
-    if dataset is not None:
-        options = {
-            "dataset": dataset,
-            "max_seq_length": calibration["max_sequence_length"],
-            "num_calibration_samples": calibration["num_samples"],
-        }
     oneshot(
         model=model,
         tokenizer=tokenizer,
+        dataset=dataset,
         recipe=recipe,
+        max_seq_length=calibration["max_sequence_length"],
+        num_calibration_samples=calibration["num_samples"],
         output_dir=str(output_path),
         save_compressed=True,
-        **options,
     )
     save_experiment_metadata(
         build_experiment_metadata(config, PROFILE_NAME), output_path / "experiment_metadata.json"

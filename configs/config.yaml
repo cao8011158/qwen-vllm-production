@@ -20,8 +20,8 @@ compression:
     method: int8_w8a8
     weight_bits: 8
     activation_bits: 8
-    activation_scheme: null
-    requires_calibration: null
+    activation_scheme: static
+    requires_calibration: true
   awq_w4a16:
     method: awq
     weight_bits: 4
@@ -29,10 +29,13 @@ compression:
     requires_calibration: true
 
 calibration:
-  dataset: null
-  split: null
-  num_samples: null
-  max_sequence_length: null
+  dataset: HuggingFaceH4/ultrachat_200k
+  split: train_sft
+  num_samples: 512
+  max_sequence_length: 2048
+  shuffle: true
+  seed: 42
+  use_chat_template: true
 
 evaluation:
   quality:

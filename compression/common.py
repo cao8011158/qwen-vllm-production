@@ -81,7 +81,7 @@ def validate_model_config(model: Mapping[str, Any]) -> None:
 
 
 def validate_compression_profile(
-    profile_name: str, profile: Mapping[str, Any], *, for_execution: bool = False
+    profile_name: str, profile: Mapping[str, Any]
 ) -> None:
     expected_method = _PROFILE_METHODS.get(profile_name)
     if expected_method is None:
@@ -96,17 +96,9 @@ def validate_compression_profile(
     elif profile_name == "int8_w8a8":
         if profile.get("weight_bits") != 8 or profile.get("activation_bits") != 8:
             raise ValueError("int8_w8a8 weight_bits and activation_bits must both be 8.")
-        scheme = profile.get("activation_scheme")
-        if scheme not in (None, "static", "dynamic"):
-            raise ValueError("int8_w8a8.activation_scheme must be static, dynamic, or null.")
-        required = profile.get("requires_calibration")
-        if required is not None and not isinstance(required, bool):
-            raise ValueError("int8_w8a8.requires_calibration must be boolean or null.")
-        if for_execution and scheme is None:
-            raise ValueError("W8A8 activation quantization scheme must be explicitly configured.")
-        if for_execution and required is None:
-            raise ValueError("W8A8 calibration requirement must be explicitly configured.")
-        if scheme == "static" and for_execution and required is not True:
+        if profile.get("activation_scheme") != "static":
+            raise ValueError("int8_w8a8.activation_scheme must be static.")
+        if profile.get("requires_calibration") is not True:
             raise ValueError("Static W8A8 requires calibration data.")
     else:
         if profile.get("weight_bits") != 4:
@@ -118,7 +110,7 @@ def validate_compression_profile(
 
 
 def validate_calibration_config(
-    calibration: Mapping[str, Any], *, required: bool = False
+    calibration: Mapping[str, Any], *, required: bool = True
 ) -> None:
     for key in ("dataset", "split"):
         value = calibration.get(key)
@@ -126,6 +118,19 @@ def validate_calibration_config(
             _nonempty_string(value, f"calibration.{key}")
         elif required:
             raise ValueError(f"calibration.{key} must be explicitly configured.")
+    for key in ("shuffle", "use_chat_template"):
+        value = calibration.get(key)
+        if value is not None:
+            if not isinstance(value, bool):
+                raise ValueError(f"calibration.{key} must be a boolean.")
+        elif required:
+            raise ValueError(f"calibration.{key} must be explicitly configured.")
+    seed = calibration.get("seed")
+    if seed is not None:
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise ValueError("calibration.seed must be an integer.")
+    elif required:
+        raise ValueError("calibration.seed must be explicitly configured.")
     for key in ("num_samples", "max_sequence_length"):
         value = calibration.get(key)
         if value is not None:
@@ -144,19 +149,22 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError("compression must contain exactly baseline_bf16, int8_w8a8, and awq_w4a16.")
     for name in _PROFILE_METHODS:
         validate_compression_profile(name, get_compression_profile(config, name))
-    validate_calibration_config(get_calibration_config(config))
+    validate_calibration_config(get_calibration_config(config), required=False)
     output = _mapping(config.get("output"), "output")
     _nonempty_string(output.get("compressed_model_root"), "output.compressed_model_root")
 
 
 def validate_execution_config(config: Mapping[str, Any], profile_name: str) -> None:
     profile = get_compression_profile(config, profile_name)
-    validate_compression_profile(profile_name, profile, for_execution=True)
+    validate_compression_profile(profile_name, profile)
     if profile_name == "baseline_bf16":
         raise ValueError("BF16 baseline uses the original model; it is not compressed.")
-    validate_calibration_config(
-        get_calibration_config(config), required=profile.get("requires_calibration") is True
-    )
+    calibration = get_calibration_config(config)
+    validate_calibration_config(calibration, required=True)
+    if calibration["shuffle"] is not True:
+        raise ValueError("Calibration shuffle must be true for both compression profiles.")
+    if calibration["use_chat_template"] is not True:
+        raise ValueError("Calibration use_chat_template must be true for both compression profiles.")
 
 
 def resolve_compressed_model_path(
@@ -194,6 +202,9 @@ def build_experiment_metadata(
         "calibration_split": calibration.get("split"),
         "calibration_samples": calibration.get("num_samples"),
         "calibration_max_sequence_length": calibration.get("max_sequence_length"),
+        "calibration_shuffle": calibration.get("shuffle"),
+        "calibration_seed": calibration.get("seed"),
+        "calibration_use_chat_template": calibration.get("use_chat_template"),
     }
 
 
@@ -221,37 +232,28 @@ def load_model_and_tokenizer(model_config: Mapping[str, Any]) -> tuple[Any, Any]
     return model, tokenizer
 
 
-def prepare_calibration_data(
-    calibration: Mapping[str, Any], tokenizer: Any, *, seed: int
-) -> Any:
-    """Select and tokenize an explicitly configured text or messages split."""
+def prepare_calibration_data(calibration: Mapping[str, Any], tokenizer: Any) -> Any:
+    """Deterministically sample conversations for statistics, never training."""
     from datasets import load_dataset
 
     validate_calibration_config(calibration, required=True)
+    if calibration["shuffle"] is not True or calibration["use_chat_template"] is not True:
+        raise ValueError("Calibration requires shuffle and the model chat template.")
+    if not getattr(tokenizer, "chat_template", None):
+        raise ValueError("The configured tokenizer has no chat template.")
     dataset = load_dataset(calibration["dataset"], split=calibration["split"])
     sample_count = calibration["num_samples"]
     if len(dataset) < sample_count:
         raise ValueError(
             f"Calibration split contains {len(dataset)} rows; {sample_count} were requested."
         )
-    dataset = dataset.shuffle(seed=seed).select(range(sample_count))
+    dataset = dataset.shuffle(seed=calibration["seed"]).select(range(sample_count))
     max_length = calibration["max_sequence_length"]
-    columns = set(dataset.column_names)
-    if "messages" in columns:
-        def format_sample(sample: Mapping[str, Any]) -> str:
-            return tokenizer.apply_chat_template(sample["messages"], tokenize=False)
-
-        add_special_tokens = False
-    elif "text" in columns:
-        def format_sample(sample: Mapping[str, Any]) -> str:
-            return sample["text"]
-
-        add_special_tokens = True
-    else:
-        raise ValueError("Calibration dataset must contain a 'text' or 'messages' column.")
+    if "messages" not in dataset.column_names:
+        raise ValueError("Calibration dataset must contain a 'messages' column for chat templating.")
 
     def tokenize(sample: Mapping[str, Any]) -> dict[str, Any]:
-        content = format_sample(sample)
+        content = tokenizer.apply_chat_template(sample["messages"], tokenize=False)
         if not isinstance(content, str) or not content.strip():
             raise ValueError("Calibration sample text must be non-empty.")
         return tokenizer(
@@ -259,7 +261,7 @@ def prepare_calibration_data(
             padding=False,
             truncation=True,
             max_length=max_length,
-            add_special_tokens=add_special_tokens,
+            add_special_tokens=False,
         )
 
     return dataset.map(tokenize, remove_columns=dataset.column_names)
