@@ -1,20 +1,22 @@
-"""Small deterministic checkpoint health check, without a benchmark dataset."""
+"""Small deterministic checkpoint health check using vLLM offline inference."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from .common import (
+    DEFAULT_GPU_MEMORY_UTILIZATION,
+    DEFAULT_SEED,
+    DEFAULT_TENSOR_PARALLEL_SIZE,
     add_model_arguments,
-    input_device,
-    load_model_and_tokenizer,
-    model_metadata,
+    local_checkpoint_metadata,
     package_versions,
     result_path,
     run_metadata,
     save_json,
+    vllm_engine_config,
 )
 
 
@@ -24,83 +26,125 @@ PROMPTS = (
     "Complete the sentence: The sky is",
 )
 MAX_NEW_TOKENS = 8
+VERSION_PACKAGES = ("vllm", "lm-eval", "torch", "transformers", "compressed-tensors", "datasets")
 
 
-def logits_are_finite(logits: Any) -> bool:
-    import torch
+def extract_generated_samples(outputs: Sequence[Any], prompts: Sequence[str]) -> list[dict[str, str]]:
+    """Require one non-empty vLLM continuation for each fixed raw prompt."""
+    if len(outputs) != len(prompts):
+        raise ValueError("vLLM returned a different number of outputs than prompts.")
+    samples = []
+    for prompt, output in zip(prompts, outputs):
+        if output.prompt != prompt or not output.outputs:
+            raise ValueError("vLLM returned a missing or mismatched prompt output.")
+        generated_text = output.outputs[0].text
+        if not isinstance(generated_text, str) or not generated_text.strip():
+            raise ValueError("Sanity generation produced empty text.")
+        samples.append({"prompt": prompt, "generated_text": generated_text})
+    return samples
 
-    return bool(torch.isfinite(logits).all().item())
 
-
-def build_sanity_result(model_name: str, model_path: str, device: str) -> dict[str, Any]:
+def build_sanity_result(
+    model_name: str,
+    model_path: str,
+    device: str,
+    *,
+    tensor_parallel_size: int = DEFAULT_TENSOR_PARALLEL_SIZE,
+    gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION,
+    max_model_len: int | None = None,
+    seed: int = DEFAULT_SEED,
+) -> dict[str, Any]:
+    engine_config = vllm_engine_config(
+        model_path,
+        tensor_parallel_size=tensor_parallel_size,
+        gpu_memory_utilization=gpu_memory_utilization,
+        max_model_len=max_model_len,
+        seed=seed,
+    )
     return {
         "evaluation": "sanity",
+        "backend": "vllm",
         **run_metadata(model_name, model_path, device),
-        "load_success": False,
-        "forward_success": False,
+        "engine_load_success": False,
         "generation_success": False,
-        "finite_logits": False,
-        "vocab_size": None,
-        "dtype": None,
-        "device": None,
         "generated_samples": [],
+        "model_config_identifier": None,
         "quantization_metadata": None,
+        "quantization_method": None,
+        "checkpoint_dtype": None,
+        "runtime_model_identifier": None,
+        "runtime_dtype": None,
+        "runtime_quantization": None,
+        "runtime_max_model_len": None,
+        "tensor_parallel_size": engine_config["tensor_parallel_size"],
+        "gpu_memory_utilization": engine_config["gpu_memory_utilization"],
+        "max_model_len": engine_config.get("max_model_len"),
+        "dtype_configuration": engine_config["dtype"],
+        "seed": seed,
         "prompts": list(PROMPTS),
-        "generation_settings": {"do_sample": False, "max_new_tokens": MAX_NEW_TOKENS},
+        "generation_settings": {"temperature": 0.0, "max_tokens": MAX_NEW_TOKENS},
         "chat_template_applied": False,
         "thinking_setting": None,
     }
 
 
 def evaluate(
-    model_path: str, model_name: str, device: str, output_dir: Path
+    model_path: str,
+    model_name: str,
+    device: str,
+    output_dir: Path,
+    *,
+    tensor_parallel_size: int = DEFAULT_TENSOR_PARALLEL_SIZE,
+    gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION,
+    max_model_len: int | None = None,
+    seed: int = DEFAULT_SEED,
 ) -> dict[str, Any]:
-    import torch
-
-    result = build_sanity_result(model_name, model_path, device)
+    result = build_sanity_result(
+        model_name, model_path, device,
+        tensor_parallel_size=tensor_parallel_size,
+        gpu_memory_utilization=gpu_memory_utilization,
+        max_model_len=max_model_len,
+        seed=seed,
+    )
     path = result_path(output_dir, model_name)
     try:
-        model, tokenizer = load_model_and_tokenizer(model_path, device)
-        result["load_success"] = True
-        result.update(model_metadata(model, tokenizer))
-        result["vocab_size"] = tokenizer.vocab_size
-        if not isinstance(result["vocab_size"], int) or result["vocab_size"] <= 0:
-            raise ValueError("Tokenizer vocabulary size is unavailable or invalid.")
-        target_device = input_device(model)
-        for prompt in PROMPTS:
-            inputs = tokenizer(prompt, return_tensors="pt")
-            inputs = {key: value.to(target_device) for key, value in inputs.items()}
-            if inputs["input_ids"].shape[-1] < 1:
-                raise ValueError("A sanity prompt produced no input tokens.")
-            with torch.inference_mode():
-                logits = model(**inputs).logits
-            if logits.ndim != 3 or logits.shape[0] != 1 or logits.shape[1] != inputs["input_ids"].shape[1]:
-                raise ValueError(f"Unexpected logits shape: {tuple(logits.shape)}.")
-            if logits.shape[-1] != model.config.vocab_size:
-                raise ValueError("Logits vocabulary dimension differs from model config.")
-            if not logits_are_finite(logits):
-                raise ValueError("Sanity forward pass produced NaN or Inf logits.")
-            result["forward_success"] = True
-            with torch.inference_mode():
-                generated = model.generate(
-                    **inputs, do_sample=False, max_new_tokens=MAX_NEW_TOKENS
-                )
-            continuation = generated[0, inputs["input_ids"].shape[1]:]
-            text = tokenizer.decode(continuation, skip_special_tokens=True).strip()
-            if not text:
-                raise ValueError("Sanity generation produced empty text.")
-            result["generated_samples"].append({"prompt": prompt, "generated_text": text})
-        result["finite_logits"] = True
+        result.update(local_checkpoint_metadata(model_path))
+        from vllm import LLM, SamplingParams
+
+        engine = LLM(**vllm_engine_config(
+            model_path,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+            seed=seed,
+        ))
+        result["engine_load_success"] = True
+        runtime_config = getattr(getattr(engine, "llm_engine", None), "model_config", None)
+        if runtime_config is not None:
+            for result_key, config_key in (
+                ("runtime_model_identifier", "model"),
+                ("runtime_dtype", "dtype"),
+                ("runtime_quantization", "quantization"),
+                ("runtime_max_model_len", "max_model_len"),
+            ):
+                value = getattr(runtime_config, config_key, None)
+                if value is not None:
+                    result[result_key] = str(value) if result_key in (
+                        "runtime_dtype", "runtime_quantization"
+                    ) else value
+        sampling_params = SamplingParams(temperature=0.0, max_tokens=MAX_NEW_TOKENS)
+        outputs = engine.generate(list(PROMPTS), sampling_params)
+        result["generated_samples"] = extract_generated_samples(outputs, PROMPTS)
         result["generation_success"] = True
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
-    result["package_versions"] = package_versions("torch", "transformers")
+    result["package_versions"] = package_versions(*VERSION_PACKAGES)
     save_json(result, path)
     return result
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run checkpoint sanity checks.")
+    parser = argparse.ArgumentParser(description="Run vLLM checkpoint sanity checks.")
     add_model_arguments(parser)
     parser.set_defaults(output_dir=Path("results/quality/sanity"))
     return parser
@@ -108,7 +152,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    result = evaluate(args.model_path, args.model_name, args.device, args.output_dir)
+    result = evaluate(
+        args.model_path, args.model_name, args.device, args.output_dir,
+        tensor_parallel_size=args.tensor_parallel_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len,
+        seed=args.seed,
+    )
     if not result["generation_success"]:
         raise RuntimeError(result.get("error", "Sanity check failed."))
 

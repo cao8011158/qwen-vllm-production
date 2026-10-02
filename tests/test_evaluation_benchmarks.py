@@ -67,10 +67,15 @@ def test_benchmark_parsers(module: object) -> None:
     args = module.build_parser().parse_args([
         "--model-path", "checkpoint", "--model-name", "int8_w8a8",
         "--device", "cuda", "--batch-size", "4", "--limit", "20", "--seed", "7",
+        "--tensor-parallel-size", "1", "--gpu-memory-utilization", "0.85",
+        "--max-model-len", "4096",
     ])
     assert args.batch_size == 4
     assert args.limit == 20
     assert args.seed == 7
+    assert args.tensor_parallel_size == 1
+    assert args.gpu_memory_utilization == 0.85
+    assert args.max_model_len == 4096
     assert args.output_dir == Path("results/quality/benchmarks")
 
 
@@ -94,13 +99,21 @@ def test_shared_runner_has_no_variant_scoring_branch(
         result = run_benchmark(
             "gsm8k", model_path=str(tmp_path / name), model_name=name,
             device="cuda", batch_size="auto", output_dir=tmp_path,
-            limit=20, seed=7,
+            limit=20, seed=7, tensor_parallel_size=1,
+            gpu_memory_utilization=0.85, max_model_len=4096,
         )
         assert result["num_fewshot"] == 5
         assert result["score"] == 0.25
         assert result["limit"] == 20
         assert result["seed"] == 7
         assert result["batch_size"] == "auto"
+        assert result["backend"] == "vllm"
+        assert result["tensor_parallel_size"] == 1
+        assert result["gpu_memory_utilization"] == 0.85
+        assert result["max_model_len"] == 4096
+        assert result["dtype_configuration"] == "auto"
+        assert result["chat_template_applied"] is False
+        assert result["thinking_setting"] is None
         saved = json.loads((tmp_path / "gsm8k" / f"{name}.json").read_text(encoding="utf-8"))
         assert saved["raw_results"] == raw
     normalized = [{key: value for key, value in call.items() if key != "model_args"}
@@ -110,6 +123,40 @@ def test_shared_runner_has_no_variant_scoring_branch(
     assert all(call["num_fewshot"] is None for call in calls)
     assert all(call["apply_chat_template"] is False for call in calls)
     assert all(call["random_seed"] == 7 for call in calls)
+    assert all(call["model"] == "vllm" for call in calls)
+    assert all("device" not in call for call in calls)
+    assert all("quantization" not in call["model_args"] for call in calls)
+    assert all("enable_thinking" not in call["model_args"] for call in calls)
+    assert all(call["model_args"]["tensor_parallel_size"] == 1 for call in calls)
+    assert all(call["model_args"]["gpu_memory_utilization"] == 0.85 for call in calls)
+    assert all(call["model_args"]["max_model_len"] == 4096 for call in calls)
+    assert all(call["model_args"]["seed"] == 7 for call in calls)
+    assert [call["model_args"]["pretrained"] for call in calls] == [
+        str(tmp_path / name) for name in ("bf16", "int8_w8a8", "awq_w4a16")
+    ]
+
+
+def test_wikitext_uses_same_vllm_runner_and_direct_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+    raw = {"results": {"wikitext": {"word_perplexity,none": 12.0}}}
+
+    def fake_evaluate(**kwargs: object) -> dict:
+        calls.append(dict(kwargs))
+        return raw
+
+    monkeypatch.setitem(sys.modules, "lm_eval", SimpleNamespace(simple_evaluate=fake_evaluate))
+    result = run_benchmark(
+        "wikitext", model_path="checkpoint", model_name="bf16", device="cuda",
+        output_dir=tmp_path, limit=20,
+    )
+    assert result["word_perplexity"] == 12.0
+    assert result["limit_unit"] == "documents"
+    assert calls[0]["model"] == "vllm"
+    assert calls[0]["tasks"] == ["wikitext"]
+    assert calls[0]["limit"] == 20
+    assert json.loads((tmp_path / "bf16.json").read_text(encoding="utf-8"))["raw_results"] == raw
 
 
 def test_invalid_limit_rejected_before_harness() -> None:

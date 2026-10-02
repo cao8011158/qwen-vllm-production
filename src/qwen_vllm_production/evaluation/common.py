@@ -1,4 +1,4 @@
-"""Shared offline evaluation inputs, model loading, and JSON output."""
+"""Shared vLLM evaluation inputs, engine settings, and JSON output."""
 
 from __future__ import annotations
 
@@ -11,6 +11,10 @@ from typing import Any, Mapping
 
 
 MODEL_NAMES = ("bf16", "int8_w8a8", "awq_w4a16")
+DEFAULT_TENSOR_PARALLEL_SIZE = 1
+DEFAULT_GPU_MEMORY_UTILIZATION = 0.90
+DEFAULT_SEED = 42
+DTYPE_CONFIGURATION = "auto"
 
 
 def validate_model_name(name: str) -> str:
@@ -71,26 +75,6 @@ def run_metadata(model_name: str, model_path: str | Path, device: str) -> dict[s
     }
 
 
-def model_metadata(model: Any, tokenizer: Any) -> dict[str, Any]:
-    config = model.config
-    quantization = getattr(config, "quantization_config", None)
-    quantization_dict = (
-        quantization.to_dict() if hasattr(quantization, "to_dict") else quantization
-    )
-    return {
-        "model_config_identifier": getattr(config, "_name_or_path", None),
-        "tokenizer_identifier": getattr(tokenizer, "name_or_path", None),
-        "model_vocab_size": getattr(config, "vocab_size", None),
-        "quantization_metadata": quantization_dict,
-        "quantization_method": (
-            quantization_dict.get("quant_method")
-            if isinstance(quantization_dict, dict) else None
-        ),
-        "dtype": str(model.dtype),
-        "device": str(model.device),
-    }
-
-
 def local_checkpoint_metadata(model_path: str | Path) -> dict[str, Any]:
     """Read local config metadata without loading weights or contacting a hub."""
     config_file = Path(model_path) / "config.json"
@@ -99,6 +83,7 @@ def local_checkpoint_metadata(model_path: str | Path) -> dict[str, Any]:
             "model_config_identifier": None,
             "quantization_metadata": None,
             "quantization_method": None,
+            "checkpoint_dtype": None,
         }
     config = json.loads(config_file.read_text(encoding="utf-8"))
     quantization = config.get("quantization_config")
@@ -108,28 +93,56 @@ def local_checkpoint_metadata(model_path: str | Path) -> dict[str, Any]:
         "quantization_method": (
             quantization.get("quant_method") if isinstance(quantization, dict) else None
         ),
+        "checkpoint_dtype": config.get("torch_dtype", config.get("dtype")),
     }
 
 
-def load_model_and_tokenizer(model_path: str | Path, device: str) -> tuple[Any, Any]:
-    """Use one loader for all variants; checkpoint metadata controls decoding."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+def vllm_engine_config(
+    model_path: str | Path,
+    *,
+    tensor_parallel_size: int = DEFAULT_TENSOR_PARALLEL_SIZE,
+    gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION,
+    max_model_len: int | None = None,
+    seed: int = DEFAULT_SEED,
+) -> dict[str, Any]:
+    """Build the same core engine configuration for sanity and lm-eval."""
+    if isinstance(tensor_parallel_size, bool) or not isinstance(tensor_parallel_size, int) or tensor_parallel_size <= 0:
+        raise ValueError("tensor_parallel_size must be a positive integer.")
+    if isinstance(gpu_memory_utilization, bool) or not isinstance(gpu_memory_utilization, (int, float)) or not 0 < gpu_memory_utilization <= 1:
+        raise ValueError("gpu_memory_utilization must be in (0, 1].")
+    if max_model_len is not None and (isinstance(max_model_len, bool) or not isinstance(max_model_len, int) or max_model_len <= 0):
+        raise ValueError("max_model_len must be a positive integer.")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("seed must be an integer.")
+    config: dict[str, Any] = {
+        "model": validate_model_path(model_path),
+        "tensor_parallel_size": tensor_parallel_size,
+        "dtype": DTYPE_CONFIGURATION,
+        "gpu_memory_utilization": float(gpu_memory_utilization),
+        "trust_remote_code": False,
+        "seed": seed,
+    }
+    if max_model_len is not None:
+        config["max_model_len"] = max_model_len
+    return config
 
-    identifier = validate_model_path(model_path)
-    tokenizer = AutoTokenizer.from_pretrained(identifier, trust_remote_code=False)
-    model = AutoModelForCausalLM.from_pretrained(
-        identifier, torch_dtype="auto", device_map=device, trust_remote_code=False
-    )
-    model.eval()
-    return model, tokenizer
 
-
-def input_device(model: Any) -> Any:
-    return model.get_input_embeddings().weight.device
+def vllm_harness_model_args(engine_config: Mapping[str, Any]) -> dict[str, Any]:
+    """lm-eval's vLLM adapter names the engine's model argument 'pretrained'."""
+    return {"pretrained": engine_config["model"], **{
+        key: value for key, value in engine_config.items() if key != "model"
+    }}
 
 
 def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--model-name", required=True, choices=MODEL_NAMES)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--device", default="cuda", choices=("cuda",),
+        help="Recorded for reproducibility; select the GPU with CUDA_VISIBLE_DEVICES.",
+    )
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--tensor-parallel-size", type=int, default=DEFAULT_TENSOR_PARALLEL_SIZE)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=DEFAULT_GPU_MEMORY_UTILIZATION)
+    parser.add_argument("--max-model-len", type=int)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)

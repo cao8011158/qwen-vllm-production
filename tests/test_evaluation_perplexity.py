@@ -1,73 +1,78 @@
-"""CPU-only mathematical checks of the sliding-window PPL protocol."""
+"""Mock-only WikiText task configuration and result checks."""
 
-import math
 from pathlib import Path
 
 import pytest
 
-from qwen_vllm_production.evaluation.perplexity import (
-    DATASET,
-    DATASET_CONFIG,
-    SPLIT,
-    build_parser,
-    masked_labels,
-    perplexity_from_nll,
-    sliding_window_spans,
+from qwen_vllm_production.evaluation import perplexity
+from qwen_vllm_production.evaluation.benchmarks.common import (
+    TASKS,
+    build_benchmark_result,
+    extract_scores,
 )
 
 
-def test_wikitext_identity() -> None:
-    assert (DATASET, DATASET_CONFIG, SPLIT) == (
-        "Salesforce/wikitext", "wikitext-2-raw-v1", "test",
+def test_official_wikitext_task_mapping() -> None:
+    spec = TASKS["wikitext"]
+    assert spec["task_identifier"] == "wikitext"
+    assert spec["dataset"] == perplexity.DATASET == "EleutherAI/wikitext_document_level"
+    assert spec["dataset_config"] == perplexity.DATASET_CONFIG == "wikitext-2-raw-v1"
+    assert spec["split"] == perplexity.SPLIT == "test"
+    assert spec["output_type"] == "loglikelihood_rolling"
+    assert spec["primary_metric"] == "word_perplexity"
+
+
+def test_wikitext_primary_and_other_official_metrics() -> None:
+    raw = {"results": {"wikitext": {
+        "word_perplexity,none": 12.0,
+        "byte_perplexity,none": 4.0,
+        "bits_per_byte,none": 2.0,
+    }}}
+    assert extract_scores("wikitext", raw) == {
+        "score": 12.0,
+        "word_perplexity": 12.0,
+        "byte_perplexity": 4.0,
+        "bits_per_byte": 2.0,
+    }
+    result = build_benchmark_result(
+        "wikitext", "checkpoint", "bf16", "cuda", "auto", 20, 42, raw,
     )
-
-
-def test_windows_score_each_target_once() -> None:
-    spans = list(sliding_window_spans(total_tokens=10, max_length=5, stride=3))
-    assert spans == [(0, 5, 1), (3, 8, 5), (5, 10, 8)]
-    targets = [index for _, end, first in spans for index in range(first, end)]
-    assert targets == list(range(1, 10))
-
-
-def test_short_final_window_does_not_double_count() -> None:
-    spans = list(sliding_window_spans(total_tokens=7, max_length=4, stride=2))
-    targets = [index for _, end, first in spans for index in range(first, end)]
-    assert targets == list(range(1, 7))
-
-
-def test_masked_labels_hide_overlap() -> None:
-    class FakeTokens:
-        def __init__(self, values: list[int]) -> None:
-            self.values = values
-
-        def clone(self) -> "FakeTokens":
-            return FakeTokens(self.values.copy())
-
-        def __setitem__(self, key: tuple[slice, slice], value: int) -> None:
-            self.values[key[1]] = [value] * len(self.values[key[1]])
-
-    source = FakeTokens([3, 4, 5, 6, 7])
-    labels = masked_labels(source, start=3, first_target=5)
-    assert labels.values == [-100, -100, 5, 6, 7]
-    assert source.values == [3, 4, 5, 6, 7]
-
-
-def test_ppl_math() -> None:
-    mean_nll, ppl = perplexity_from_nll(6.0, 3)
-    assert mean_nll == 2.0
-    assert ppl == pytest.approx(math.exp(2.0))
-
-
-def test_invalid_window_parameters() -> None:
-    with pytest.raises(ValueError, match="stride"):
-        list(sliding_window_spans(10, 4, 4))
+    assert result["evaluation"] == "perplexity"
+    assert result["backend"] == "vllm"
+    assert result["primary_metric"] == "word_perplexity"
+    assert result["word_perplexity"] == 12.0
+    assert result["limit"] == 20
+    assert result["limit_unit"] == "documents"
+    assert result["raw_results"] is raw
 
 
 def test_perplexity_parser() -> None:
-    args = build_parser().parse_args(
-        ["--model-path", "checkpoint", "--model-name", "bf16", "--limit", "20"]
-    )
+    args = perplexity.build_parser().parse_args([
+        "--model-path", "checkpoint", "--model-name", "bf16",
+        "--limit", "20", "--batch-size", "auto", "--tensor-parallel-size", "1",
+    ])
     assert args.limit == 20
-    assert args.max_length == 2048
-    assert args.stride == 1024
+    assert args.batch_size == "auto"
+    assert args.tensor_parallel_size == 1
+    assert args.max_model_len is None
     assert args.output_dir == Path("results/quality/perplexity")
+
+
+def test_perplexity_uses_shared_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_runner(task: str, **kwargs: object) -> dict:
+        captured.update({"task": task, **kwargs})
+        return {"word_perplexity": 12.0}
+
+    monkeypatch.setattr(perplexity, "run_benchmark", fake_runner)
+    result = perplexity.evaluate(
+        "checkpoint", "bf16", "cuda", tmp_path,
+        batch_size=4, limit=20, seed=7, max_model_len=4096,
+    )
+    assert result == {"word_perplexity": 12.0}
+    assert captured["task"] == "wikitext"
+    assert captured["limit"] == 20
+    assert captured["batch_size"] == 4
+    assert captured["seed"] == 7
+    assert captured["max_model_len"] == 4096
