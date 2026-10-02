@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from compression.common import (
+from qwen_vllm_production.compression.common import (
     get_compression_profile,
     get_model_config,
     load_config,

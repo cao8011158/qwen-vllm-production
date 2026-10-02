@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from compression.common import (
+from qwen_vllm_production.compression.common import (
     build_experiment_metadata,
     get_calibration_config,
     get_compression_profile,

@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from compression.common import get_calibration_config, load_config, validate_calibration_config
+from qwen_vllm_production.compression.common import (
+    get_calibration_config,
+    load_config,
+    validate_calibration_config,
+)
 
 
 pytestmark = [
@@ -35,7 +39,7 @@ def test_awq_load_calibrate_compress_save_reload(tmp_path: Path) -> None:
     import yaml
 
     smoke_config.write_text(yaml.safe_dump(config), encoding="utf-8")
-    from compression.compress_awq import run
+    from qwen_vllm_production.compression.compress_awq import run
 
     output_path = run(smoke_config)
     assert (output_path / "experiment_metadata.json").is_file()
