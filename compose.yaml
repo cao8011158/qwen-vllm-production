@@ -1,0 +1,110 @@
+name: qwen-vllm-production
+
+services:
+  vllm:
+    image: vllm/vllm-openai:v0.26.0
+    container_name: qwen-vllm
+
+    ipc: host
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities:
+                - gpu
+
+    volumes:
+      - /workspace/models:/models:ro
+      - vllm-cache:/root/.cache/vllm
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    command:
+      - --model
+      - /models/qwen3-14b/awq_w4a16
+      - --served-model-name
+      - qwen3-14b
+      - --max-model-len
+      - "8192"
+      - --gpu-memory-utilization
+      - "0.90"
+      - --tensor-parallel-size
+      - "1"
+      - --dtype
+      - bfloat16
+      - --seed
+      - "42"
+      - --no-enable-prefix-caching
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+
+    restart: unless-stopped
+
+    networks:
+      - serving
+
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: qwen-prometheus
+
+    volumes:
+      - ./observability/prometheus/prometheus.docker.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+
+    ports:
+      - "127.0.0.1:9090:9090"
+
+    restart: unless-stopped
+
+    networks:
+      - serving
+
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    container_name: qwen-grafana
+
+    depends_on:
+      - prometheus
+
+    environment:
+      PROMETHEUS_URL: http://prometheus:9090
+      VLLM_GRAFANA_DASHBOARDS_PATH: /var/lib/grafana/dashboards
+
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-phase3-local-only}
+
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+    ports:
+      - "3000:3000"
+
+    restart: unless-stopped
+
+    networks:
+      - serving
+
+
+networks:
+  serving:
+    name: qwen-serving
+
+
+volumes:
+  vllm-cache:
+  prometheus-data:
+  grafana-data:
