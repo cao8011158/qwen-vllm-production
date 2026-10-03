@@ -1,0 +1,27 @@
+# Copy to terraform.tfvars and supply the real selected data center.
+# Replace this placeholder; no availability or regional ID has been assumed.
+data_center_id = "REPLACE_WITH_REAL_DATA_CENTER_ID"
+
+# Default: Terraform creates a protected 100 GB Network Volume.
+network_volume_id      = null
+network_volume_size_gb = 100
+
+# Pod creation is external because the official Provider cannot safely
+# express all required settings. Add the actual IDs after external creation.
+gpu_pod_id        = null
+prometheus_pod_id = null
+grafana_pod_id    = null
+
+# Record real immutable image references when available, not invented hashes.
+pod_images = {
+  gpu        = null
+  prometheus = null
+  grafana    = null
+}
+
+deployment_revision = null
+awq_source_revision = null
+awq_gdrive_source   = null
+
+# RUNPOD_API_KEY, rclone OAuth/service-account credentials and Grafana
+# passwords must not be added to this file or Terraform outputs.
