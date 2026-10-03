@@ -1,27 +1,24 @@
-# Copy to terraform.tfvars and supply the real selected data center.
-# Replace this placeholder; no availability or regional ID has been assumed.
+# Copy to private terraform.tfvars only when that file does not exist.
 data_center_id = "REPLACE_WITH_REAL_DATA_CENTER_ID"
 
 # Default: Terraform creates a protected 100 GB Network Volume.
 network_volume_id      = null
 network_volume_size_gb = 100
 
-# Pod creation is external because the official Provider cannot safely
-# express all required settings. Add the actual IDs after external creation.
+# Pods are manually created in Console with these exact official tags:
+# GPU: vllm/vllm-openai:v0.26.0
+# CPU: prom/prometheus:v3.5.0
+# CPU: grafana/grafana:12.1.0
 gpu_pod_id        = null
 prometheus_pod_id = null
 grafana_pod_id    = null
 
-# Record real immutable image references when available, not invented hashes.
-pod_images = {
-  gpu        = null
-  prometheus = null
-  grafana    = null
-}
-
-deployment_revision = null
+# Actual GitHub repository and a published commit containing this bootstrap.
+# No repository snapshot or custom image is required on either CPU Pod.
+repository_url      = null
+repository_revision = null
 awq_source_revision = null
 awq_gdrive_source   = null
 
-# RUNPOD_API_KEY, rclone OAuth/service-account credentials and Grafana
-# passwords must not be added to this file or Terraform outputs.
+# RUNPOD_API_KEY, rclone credentials, Grafana administrator passwords and
+# Grafana API tokens must never be added to tfvars or Terraform outputs.

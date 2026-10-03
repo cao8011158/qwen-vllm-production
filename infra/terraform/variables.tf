@@ -65,32 +65,24 @@ variable "grafana_pod_id" {
   }
 }
 
-variable "pod_images" {
-  type = object({
-    gpu        = optional(string)
-    prometheus = optional(string)
-    grafana    = optional(string)
-  })
-  default     = {}
-  nullable    = false
-  description = "Operator-supplied immutable image references for the external Pods. Image contracts are in docs/runpod_iac.md."
+variable "repository_url" {
+  type        = string
+  default     = null
+  description = "Actual GitHub HTTPS URL cloned at runtime in the GPU Pod. No repository is baked into an image."
 
   validation {
-    condition = alltrue([
-      for image in [var.pod_images.gpu, var.pod_images.prometheus, var.pod_images.grafana] :
-      image == null ? true : can(regex("^.+@sha256:[a-f0-9]{64}$", image))
-    ])
-    error_message = "Leave unknown images null; record real image@sha256:digest references when available."
+    condition     = var.repository_url == null ? true : can(regex("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(\\.git)?$", var.repository_url))
+    error_message = "Use null or the actual GitHub HTTPS repository URL without embedded credentials."
   }
 }
 
-variable "deployment_revision" {
+variable "repository_revision" {
   type        = string
   default     = null
-  description = "Actual 40-character repository commit used in all three images. Required by bootstrap, not invented by IaC."
+  description = "Actual repository commit cloned by GPU bootstrap. CPU Pods do not use the repository."
 
   validation {
-    condition     = var.deployment_revision == null ? true : can(regex("^[a-f0-9]{40}$", var.deployment_revision))
+    condition     = var.repository_revision == null ? true : can(regex("^[a-f0-9]{40}$", var.repository_revision))
     error_message = "Use null or the real full repository commit SHA."
   }
 }

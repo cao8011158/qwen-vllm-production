@@ -1,72 +1,90 @@
 #!/usr/bin/env bash
-# CPU-only Pod startup. Provision the existing runtime-verified dashboard.
+# External configuration client: run on the GPU Pod or an operator machine.
+# Grafana itself uses grafana/grafana:12.1.0 and its unchanged /run.sh entrypoint.
+# This script sends API requests only when the operator explicitly executes it.
 set -euo pipefail
 umask 077
+: "${GRAFANA_URL:?Supply https://<GRAFANA_POD_ID>-3000.proxy.runpod.net}"
+: "${PROMETHEUS_URL:?Supply https://<PROMETHEUS_POD_ID>-9090.proxy.runpod.net}"
+: "${VLLM_DASHBOARD_FILE:?Supply the dashboard generated from an actual GPU metrics snapshot}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
-: "${DEPLOYMENT_REVISION:?Supply the actual repository commit used in the image}"
-: "${PROMETHEUS_URL:?Supply the Prometheus CPU Pod's https proxy origin}"
-: "${GRAFANA_PUBLIC_URL:?Supply this Grafana CPU Pod's https proxy origin}"
-: "${GRAFANA_PASSWORD:?Supply a private administrator password outside Terraform}"
-: "${VLLM_DASHBOARD_FILE:?Provide the dashboard generated from this GPU Pod's actual metrics snapshot}"
-REPO_DIR="${REPO_DIR:-/opt/qwen-vllm-production}"
-PYTHON_BIN="${PYTHON_BIN:-/usr/bin/python3}"
-GRAFANA_HOME="${GRAFANA_HOME:-/usr/share/grafana}"
-GRAFANA_BIN="${GRAFANA_BIN:-$GRAFANA_HOME/bin/grafana}"
-GRAFANA_WORK_DIR="${GRAFANA_WORK_DIR:-/workspace/grafana}"
-
-[[ "$DEPLOYMENT_REVISION" =~ ^[a-f0-9]{40}$ ]] || { echo "Invalid repository revision." >&2; exit 1; }
-[[ -f "$REPO_DIR/.deployment-revision" ]] || { echo "Image repository revision marker is missing." >&2; exit 1; }
-[[ "$(cat "$REPO_DIR/.deployment-revision")" == "$DEPLOYMENT_REVISION" ]] || { echo "Image repository revision mismatch." >&2; exit 1; }
-[[ -x "$PYTHON_BIN" && -x "$GRAFANA_BIN" ]] || { echo "Image must contain Python and Grafana." >&2; exit 1; }
-version_text="$("$GRAFANA_BIN" --version 2>&1)"
-[[ "$version_text" =~ (^|[^0-9])12\.1\.0([^0-9]|$) ]] || { echo "Expected Grafana 12.1.0." >&2; exit 1; }
-
-export GRAFANA_USER="${GRAFANA_USER:-admin}"
-export GF_SECURITY_ADMIN_USER="$GRAFANA_USER"
-export GF_SECURITY_ADMIN_PASSWORD="$GRAFANA_PASSWORD"
-export GF_USERS_ALLOW_SIGN_UP=false
-export GF_SERVER_HTTP_ADDR=0.0.0.0
-export GF_SERVER_HTTP_PORT=3000
-export GF_SERVER_ROOT_URL="$GRAFANA_PUBLIC_URL/"
-export GF_PATHS_PROVISIONING="$GRAFANA_WORK_DIR/provisioning"
-export GF_PATHS_DATA="$GRAFANA_WORK_DIR/data"
-export GF_PATHS_LOGS="$GRAFANA_WORK_DIR/logs"
-export GF_PATHS_PLUGINS="$GRAFANA_WORK_DIR/plugins"
-export VLLM_GRAFANA_DASHBOARDS_PATH="$GRAFANA_WORK_DIR/dashboards"
-
-"$PYTHON_BIN" - "$PROMETHEUS_URL" "$GRAFANA_PUBLIC_URL" <<'PY'
-import re
-import sys
-
-if sys.version_info < (3, 11):
-    raise SystemExit("Python >= 3.11 is required.")
-for url, port in ((sys.argv[1], 9090), (sys.argv[2], 3000)):
-    if not re.fullmatch(rf"https://[a-z0-9]+-{port}\.proxy\.runpod\.net", url):
-        raise SystemExit(f"Expected the corresponding RunPod HTTP proxy origin on port {port}.")
-PY
-
-mkdir -p "$GF_PATHS_PROVISIONING" "$GF_PATHS_DATA" "$GF_PATHS_LOGS" \
-  "$GF_PATHS_PLUGINS" "$VLLM_GRAFANA_DASHBOARDS_PATH"
-cp -R "$REPO_DIR/observability/grafana/provisioning/." "$GF_PATHS_PROVISIONING/"
-"$PYTHON_BIN" - "$VLLM_DASHBOARD_FILE" "$VLLM_GRAFANA_DASHBOARDS_PATH/vllm-serving-overview.json" <<'PY'
+"$PYTHON_BIN" - <<'PY'
+import base64
 import json
-import sys
+import os
+import re
+import ssl
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
-source = Path(sys.argv[1])
-dashboard = json.loads(source.read_text(encoding="utf-8"))
-if dashboard.get("uid") != "vllm-serving-overview":
-    raise SystemExit("Unexpected dashboard UID.")
-if not any(
+grafana = os.environ["GRAFANA_URL"]
+prometheus = os.environ["PROMETHEUS_URL"]
+for url, port in ((grafana, 3000), (prometheus, 9090)):
+    if not re.fullmatch(rf"https://[a-z0-9]+-{port}\.proxy\.runpod\.net", url):
+        raise SystemExit(f"Expected the actual HTTPS RunPod proxy origin on port {port}.")
+dashboard = json.loads(Path(os.environ["VLLM_DASHBOARD_FILE"]).read_text(encoding="utf-8"))
+if dashboard.get("uid") != "vllm-serving-overview" or not any(
     "vllm:" in target.get("expr", "")
     for panel in dashboard.get("panels", [])
     for target in panel.get("targets", [])
 ):
-    raise SystemExit("Bootstrap dashboard rejected: run existing prepare_dashboard.py with an actual metrics snapshot.")
-path = Path(sys.argv[2])
-temporary = path.with_suffix(".tmp")
-temporary.write_text(json.dumps(dashboard, indent=2) + "\n", encoding="utf-8")
-temporary.replace(path)
-PY
+    raise SystemExit("Use prepare_dashboard.py output from actual /metrics, not the bootstrap up-only dashboard.")
+for panel in dashboard.get("panels", []):
+    if panel.get("datasource", {}).get("uid") != "vllm-prometheus":
+        raise SystemExit("Unexpected panel datasource UID.")
+token = os.environ.get("GRAFANA_TOKEN")
+if token:
+    authorization = "Bearer " + token
+else:
+    user, password = os.environ.get("GRAFANA_USER"), os.environ.get("GRAFANA_PASSWORD")
+    if not user or not password:
+        raise SystemExit("Set GRAFANA_TOKEN or GRAFANA_USER + GRAFANA_PASSWORD outside Terraform.")
+    authorization = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
 
-exec "$GRAFANA_BIN" server --homepath "$GRAFANA_HOME"
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+opener = build_opener(ProxyHandler({}), HTTPSHandler(context=ssl.create_default_context()), NoRedirect())
+
+def request(method, path, payload=None, *, allow_missing=False):
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = Request(grafana + path, data=body, method=method, headers={
+        "Authorization": authorization, "Accept": "application/json", "Content-Type": "application/json",
+    })
+    try:
+        with opener.open(req, timeout=30) as response:
+            return json.load(response)
+    except HTTPError as error:
+        if allow_missing and error.code == 404:
+            return None
+        raise SystemExit(f"Grafana {method} {path} failed: HTTP {error.code}; inspect permissions and service logs.") from None
+    except (URLError, ValueError) as error:
+        raise SystemExit(f"Grafana {method} {path} failed: {type(error).__name__}.") from None
+
+datasource = {
+    "uid": "vllm-prometheus", "name": "vLLM Prometheus", "type": "prometheus",
+    "access": "proxy", "url": prometheus, "basicAuth": False, "isDefault": True,
+    "jsonData": {"httpMethod": "GET", "timeInterval": "5s"},
+}
+existing = request("GET", "/api/datasources/uid/vllm-prometheus", allow_missing=True)
+if existing is None:
+    request("POST", "/api/datasources", datasource)
+else:
+    if existing.get("type") != "prometheus" or existing.get("readOnly"):
+        raise SystemExit("The datasource UID is occupied by a different/provisioned datasource; review it explicitly.")
+    datasource["id"] = existing["id"]
+    request("PUT", "/api/datasources/uid/vllm-prometheus", datasource)
+
+existing_dashboard = request("GET", "/api/dashboards/uid/vllm-serving-overview", allow_missing=True)
+dashboard["id"] = None if existing_dashboard is None else existing_dashboard["dashboard"]["id"]
+dashboard["version"] = 0 if existing_dashboard is None else existing_dashboard["dashboard"]["version"]
+payload = {"dashboard": dashboard, "overwrite": True, "message": "RunPod runtime metrics dashboard"}
+if existing_dashboard is not None and existing_dashboard.get("meta", {}).get("folderUid"):
+    payload["folderUid"] = existing_dashboard["meta"]["folderUid"]
+request("POST", "/api/dashboards/db", payload)
+print("Configured datasource vllm-prometheus and dashboard vllm-serving-overview through Grafana HTTP API.")
+print("Run the existing check_prometheus.py/check_grafana.py manually to verify actual data.")
+PY

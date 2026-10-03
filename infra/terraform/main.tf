@@ -19,6 +19,9 @@ locals {
   prometheus_url    = var.prometheus_pod_id == null ? null : "https://${var.prometheus_pod_id}-9090.proxy.runpod.net"
   grafana_url       = var.grafana_pod_id == null ? null : "https://${var.grafana_pod_id}-3000.proxy.runpod.net"
 
+  repository_base_url = var.repository_url == null ? null : trimsuffix(var.repository_url, ".git")
+  gpu_bootstrap_url   = var.repository_url == null || var.repository_revision == null ? null : "${replace(local.repository_base_url, "https://github.com/", "https://raw.githubusercontent.com/")}/${var.repository_revision}/scripts/bootstrap_gpu.sh"
+
   external_pod_ids = compact([
     var.gpu_pod_id == null ? "" : var.gpu_pod_id,
     var.prometheus_pod_id == null ? "" : var.prometheus_pod_id,
