@@ -23,12 +23,12 @@ variable "network_volume_id" {
 variable "network_volume_size_gb" {
   type        = number
   nullable    = false
-  default     = 100
-  description = "Network Volume capacity in GB; 100 by default. Existing external volumes are not resized."
+  default     = 60
+  description = "Network Volume capacity in GB; RunPod minimum is 10 GB and the project default is 60 GB. Existing external volumes are not resized."
 
   validation {
-    condition     = var.network_volume_size_gb >= 100 && floor(var.network_volume_size_gb) == var.network_volume_size_gb
-    error_message = "Capacity must be an integer of at least 100 GB for this deployment."
+    condition     = var.network_volume_size_gb >= 10 && floor(var.network_volume_size_gb) == var.network_volume_size_gb
+    error_message = "Capacity must be an integer of at least 10 GB (RunPod minimum); the project default is 60 GB."
   }
 }
 

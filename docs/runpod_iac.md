@@ -26,7 +26,7 @@ Terraform、测试、Git 操作或任何资源/API 写入。下面全部是操�
 | Grafana | grafana/grafana:12.1.0 | CPU-only | 3000 |
 
 已经核实的官方 Provider 1.0.8 保持不变。Terraform 只声明真实
-runpod_network_volume，默认 name=qwen-vllm-production、size=100 GB，
+runpod_network_volume，默认 name=qwen-vllm-production、size=60 GB，
 data_center_id 由操作者提供，prevent_destroy=true。
 三个 Pod 均在 Console 创建；Terraform 的 ID、URL、启动 JSON 与环境输出只是
 配置约定，不会创建、修改、检查或删除这些 Pod。
@@ -84,7 +84,7 @@ Template 在这里仅记录官方 image 和运行参数，不构建任何 image�
 GPU Pod
   vLLM :8000
   benchmark client -> http://127.0.0.1:8000
-  /workspace <- 100 GB Network Volume
+  /workspace <- 60 GB Network Volume
        |
        | https://<GPU_ID>-8000.proxy.runpod.net/metrics
        v
@@ -94,6 +94,12 @@ Prometheus CPU Pod :9090
        v
 Grafana CPU Pod :3000
 ~~~
+
+RunPod Console 当前由操作者确认最低允许 10 GB；本项目默认选择 60 GB，
+用于容纳 AWQ W4A16 checkpoint（约 9.4 GB）、BF16 checkpoint（约 28 GB）、
+repository、benchmark results、logs 和 cache，并留出合理余量。
+容量必须为整数 GB，Terraform validation 的最低值为 10 GB，60 GB 是项目默认值。
+按操作者当前确认的存储单价估算：60 GB × $0.07/GB/month ≈ $4.20/month（仅存储）。
 
 正式 TTFT/TPOT/E2E 不经过 RunPod proxy。benchmark 必须在 GPU Pod 内运行，
 三个 Pod ID 必须不同。GPU proxy 仅作为监控来源。
@@ -279,7 +285,7 @@ terraform.tfvars 是私有本地文件，不提交 Git，也不要加入 noteboo
 data_center_id = "REAL_RUNPOD_DATA_CENTER_ID"
 
 network_volume_id      = null
-network_volume_size_gb = 100
+network_volume_size_gb = 60
 
 gpu_pod_id        = null
 prometheus_pod_id = null

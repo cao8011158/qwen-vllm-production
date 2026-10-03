@@ -1,9 +1,9 @@
 # Copy to private terraform.tfvars only when that file does not exist.
 data_center_id = "REPLACE_WITH_REAL_DATA_CENTER_ID"
 
-# Default: Terraform creates a protected 100 GB Network Volume.
+# Default: Terraform creates a protected 60 GB Network Volume; RunPod minimum is 10 GB.
 network_volume_id      = null
-network_volume_size_gb = 100
+network_volume_size_gb = 60
 
 # Pods are manually created in Console with these exact official tags:
 # GPU: vllm/vllm-openai:v0.26.0
