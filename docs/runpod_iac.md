@@ -9,6 +9,9 @@ RunPod Console = 手工创建三个 Pod
 runtime config = 连接三个服务
 ~~~
 
+默认 Terraform 执行路径为 Local VS Code → GitHub → Google Colab → private Google Drive state。
+详见 [Google Colab Terraform workflow](#google-colab-terraform-workflow)。
+
 本次只修改代码/文档并进行静态 review。没有执行命令、安装软件、运行镜像、
 Terraform、测试、Git 操作或任何资源/API 写入。下面全部是操作者后续手工步骤。
 
@@ -114,40 +117,289 @@ GPU 持久目录：
 不要将 root-owned 的空卷直接盖到这些 non-root 数据目录上。
 CPU 数据不是本方案的独立持久存储；Pod 重建/容器数据丢失后需重新导入配置和 dashboard。
 
-## 4. Terraform：手工创建存储
+## 4. Terraform：源码、state 与职责
+
+默认推荐工作流为：**本地 VS Code 编写 IaC → 手工 commit/push 到 GitHub →
+Google Colab 执行 Terraform → private Google Drive 保存 state → Console 创建三个 Pod**。
+完整 notebook 示例见下一章 Google Colab Terraform workflow。
+本次没有执行任何 Git 或 Terraform 命令。
 
 首次复制 terraform.tfvars.example 到私有 terraform.tfvars；已有文件则编辑。
 旧配置中的 pod_images、deployment_revision 已移除，改为 repository_url、
 repository_revision。三个 image tag 已在输出中固定，无需提供 image digest。
+repository_revision 应是包含当前代码的已发布完整 commit；首次只创建 volume 时，
+repository 与模型相关输入都可以先保持 null。
 
-填写实际 data_center_id，并通过私密方式设置本地 RUNPOD_API_KEY。
-repository_url 是实际 GitHub HTTPS 地址，repository_revision 是包含本次脚本的
-**已发布完整 commit SHA**。本次没有 commit/push，也不猜仓库地址或 SHA。
-这些字段允许先保持 null，以便先创建 volume。
+**Terraform DOES：**
 
-~~~powershell
-Copy-Item -LiteralPath infra/terraform/terraform.tfvars.example -Destination infra/terraform/terraform.tfvars
-terraform -chdir=infra/terraform init
-terraform -chdir=infra/terraform fmt
-terraform -chdir=infra/terraform validate
-terraform -chdir=infra/terraform plan -out=runpod.tfplan
-# 默认计划只应新增一个 Network Volume；审阅后再执行。
-terraform -chdir=infra/terraform apply runpod.tfplan
-terraform -chdir=infra/terraform output network_volume_id
-~~~
+- 创建/管理 Network Volume。
+- 在 Terraform state 中跟踪该 Network Volume。
+- 根据输入推导 volume ID、Pod proxy URLs 和部署配置 outputs。
 
-保留 init 生成的官方 1.0.8 provider lock。填写三个真实 Pod ID 后，人工 plan/apply
-更新 outputs，不涉及 Pod 管理：
+**Terraform DOES NOT：**
 
-~~~powershell
+- 创建 GPU Pod、Prometheus Pod 或 Grafana Pod。
+- 启动 vLLM。
+- 运行 benchmark。
+- 从 Google Drive 复制模型。
+
+Google Drive → GPU Network Volume 的模型复制仍由 scripts/bootstrap_gpu.sh
+在 GPU Pod runtime 中通过 rclone 完成；这部分实现未改变。
+Colab 的 Drive mount 用于 Terraform state，与 GPU Pod 的 /workspace 模型卷是两种
+独立存储用途。
+
+填写三个真实 Pod ID 后，使用同一份 Drive state 手工 plan/apply 更新 outputs；
+不涉及 Pod 管理。之后可读取原有配置输出：
+
+~~~bash
+%%bash
+set -euo pipefail
+cd /content/qwen-vllm-production
 terraform -chdir=infra/terraform output -json deployment_contract
 terraform -chdir=infra/terraform output -json bootstrap_environment
 terraform -chdir=infra/terraform output -raw gpu_start_command
 terraform -chdir=infra/terraform output -json configuration_client_environment
 ~~~
 
-不要把 RUNPOD_API_KEY、rclone config、Grafana password/token 写进 tfvars/state/output。
-模型卷有 prevent_destroy；Terraform 不负责停止三个外部 Pod，卷保留也会继续计费。
+模型卷仍有 prevent_destroy；Terraform 不负责停止三个外部 Pod，卷保留会继续计费。
+
+## Google Colab Terraform workflow
+
+### 执行顺序与前提
+
+~~~text
+Local VS Code
+  -> GitHub（由操作者手工 commit/push）
+  -> Google Colab
+  -> mount Google Drive
+  -> load RUNPOD_API_KEY from Colab Secrets
+  -> clone/pull repository
+  -> terraform init（local backend path 指向 Drive）
+  -> terraform validate
+  -> terraform plan（审阅仅创建一个 Network Volume）
+  -> terraform apply
+  -> manually create 3 RunPod Pods
+~~~
+
+用户提供的 main 起点为 60a11a5f7de9ef59a88701df8f1c64a5659ed838。
+本补丁仍需由操作者提交/推送；Colab 应获取包含 backend 与 ignore 修改的新提交，
+不要把上述起点当作已包含本补丁的 revision。
+
+以下示例假定 Colab 已手工准备符合 versions.tf 的 Terraform CLI（>=1.5、<2）。
+示例不安装 Terraform，也不运行 bootstrap、模型或 benchmark。
+每个以 %%bash 开头的 block 是一个 Colab code cell；其命令仅在操作者运行 cell 时执行。
+任一步失败应停止，不跳过格式、验证或 plan 审阅直接 apply。
+
+只使用默认 Terraform workspace，并由一个 Colab session 操作这份 state。
+不要让本地和多个 notebook 同时写它；Google Drive persistence 不等于远程 SaaS backend。
+如果已经创建过受管理的 volume，先找回并备份原 state，再迁移到下面的 Drive path。
+不要因 /content 或旧 state 丢失而重新 apply 空 state 来创建第二个卷。
+
+### 1. 挂载 Google Drive
+
+~~~python
+from google.colab import drive
+drive.mount("/content/drive")
+~~~
+
+确认 Drive 挂载成功；若失败则停止，不能把未挂载的 /content/drive 当成普通临时目录使用。
+
+### 2. 从 Colab Secrets 读取 API key
+
+在 Colab Secrets 中添加 RUNPOD_API_KEY，并授权当前 notebook 访问：
+
+~~~python
+from google.colab import userdata
+import os
+
+os.environ["RUNPOD_API_KEY"] = userdata.get("RUNPOD_API_KEY")
+print("RUNPOD_API_KEY loaded:", bool(os.environ.get("RUNPOD_API_KEY")))
+~~~
+
+只打印是否已加载，不打印 key 内容，不显示整个 os.environ，也不将 key 写入 tfvars。
+Python kernel 设置的环境变量会供后续 notebook 启动的 Terraform 进程使用。
+
+### 3. Clone repository；已有 checkout 则 pull
+
+~~~bash
+%%bash
+set -euo pipefail
+cd /content
+if [ -d qwen-vllm-production/.git ]; then
+  cd qwen-vllm-production
+  git pull --ff-only
+elif [ -e qwen-vllm-production ]; then
+  echo "Existing directory is not a Git checkout; inspect it before continuing." >&2
+  exit 1
+else
+  git clone https://github.com/cao8011158/qwen-vllm-production.git
+  cd qwen-vllm-production
+fi
+~~~
+
+后续每个 shell cell 都显式 cd 到 /content/qwen-vllm-production，
+不依赖上一个 %%bash cell 的临时 shell 工作目录。
+
+### 4. 创建持久 state 目录
+
+~~~bash
+%%bash
+set -euo pipefail
+[ -d /content/drive/MyDrive ]
+mkdir -p /content/drive/MyDrive/qwen-vllm-production/terraform
+~~~
+
+state 的唯一目标路径为：
+
+~~~text
+/content/drive/MyDrive/qwen-vllm-production/terraform/terraform.tfstate
+~~~
+
+Colab /content 是临时文件系统。state 不能仅保存在 checkout 下或其他 /content 临时目录。
+下一次 Colab session 应重新挂载同一个 Drive，并复用同一路径；不要换成空的新 state。
+
+### 5. 准备私有 tfvars
+
+仅在文件不存在时复制 example；已有文件直接编辑，不覆盖已有部署参数：
+
+~~~bash
+%%bash
+set -euo pipefail
+cd /content/qwen-vllm-production
+if [ ! -e infra/terraform/terraform.tfvars ]; then
+  cp infra/terraform/terraform.tfvars.example \
+     infra/terraform/terraform.tfvars
+fi
+~~~
+
+terraform.tfvars 是私有本地文件，不提交 Git，也不要加入 notebook 的公开输出。
+第一次新建 Network Volume 所需的最小内容：
+
+~~~hcl
+data_center_id = "REAL_RUNPOD_DATA_CENTER_ID"
+
+network_volume_id      = null
+network_volume_size_gb = 100
+
+gpu_pod_id        = null
+prometheus_pod_id = null
+grafana_pod_id    = null
+
+repository_url      = null
+repository_revision = null
+awq_source_revision = null
+awq_gdrive_source   = null
+~~~
+
+REAL_RUNPOD_DATA_CENTER_ID 是占位符，必须替换为所选真实 RunPod data center ID。
+不要把真实 API key 放进 tfvars。新 session 中该文件可能需要重新从私有记录准备，
+而不是靠 GitHub 存储私有变量。
+
+### 6. Init：在运行时指定 backend path
+
+Terraform source 只声明 backend "local" {}；Google Drive 路径不写进任何 .tf 文件。
+从 repository 根目录执行的准确命令为：
+
+~~~bash
+%%bash
+set -euo pipefail
+cd /content/qwen-vllm-production
+terraform -chdir=infra/terraform init \
+  -backend-config="path=/content/drive/MyDrive/qwen-vllm-production/terraform/terraform.tfstate"
+~~~
+
+这一步使用 local backend，把 state 指向 private Drive 文件，而非临时 /content checkout。
+如果 init 提示已有 backend/state 需要迁移，先备份和核对旧 state，不盲目更换配置或丢弃它。
+
+### 7. Formatting 与 validation
+
+~~~bash
+%%bash
+set -euo pipefail
+cd /content/qwen-vllm-production
+terraform -chdir=infra/terraform fmt -check
+terraform -chdir=infra/terraform validate
+~~~
+
+未通过 fmt -check 或 validate 时停止，在本地修正、审阅和提交源码后再继续。
+本次没有实际运行这些检查，不能声称已通过 Terraform CLI validation。
+
+### 8. Plan：只允许一个 Network Volume
+
+~~~bash
+%%bash
+set -euo pipefail
+cd /content/qwen-vllm-production
+terraform -chdir=infra/terraform plan \
+  -out=runpod.tfplan
+~~~
+
+在没有现有受管理资源、network_volume_id=null 的第一次正常 plan 中，预期：
+
+~~~text
+Plan: 1 to add, 0 to change, 0 to destroy.
+
+唯一新增 resource：
+runpod_network_volume.workspace[0]
+~~~
+
+**不应出现任何 Pod resource。** 若有 Pod、任何删除动作（destroy > 0）、
+unexpected replacement、多个 managed resources 或其他非预期变更，则停止，
+不执行 apply。outputs 的派生值不是新增云 resource。
+
+再次使用已存在的同一份 state 时，不应要求再次创建同一个 volume。
+如果预期复用旧卷却仍显示新增，应先确认 state 是否正确，不能照搬“首次 1 to add”的结论。
+
+-chdir 使保存的计划位于 infra/terraform/runpod.tfplan。
+plan 文件仍在临时 checkout 中且必须保持私有；runtime 丢失后重新 plan 并审阅，
+不要把旧计划当成新的批准。
+
+### 9. Apply：人工审阅后单独执行
+
+~~~bash
+%%bash
+set -euo pipefail
+cd /content/qwen-vllm-production
+terraform -chdir=infra/terraform apply runpod.tfplan
+~~~
+
+这是操作者确认计划后手工执行的资源创建步骤；没有自动 approve。
+本次未执行 apply，也没有创建任何真实资源。
+
+### 10. 输出 Network Volume ID
+
+~~~bash
+%%bash
+set -euo pipefail
+cd /content/qwen-vllm-production
+terraform -chdir=infra/terraform output network_volume_id
+~~~
+
+取得 ID 后再按第 5 节手工创建三个官方 image Pod，
+并在 GPU Pod 创建时把这个 Network Volume 挂载到 /workspace。
+
+### State、secrets 与 lock file 安全
+
+| 内容 | 保存位置 |
+| --- | --- |
+| Terraform source | GitHub repository |
+| Terraform state | private Google Drive path |
+| secrets | Colab Secrets / Pod runtime secrets |
+
+terraform.tfstate 可能包含 resource IDs 和基础设施信息，不应提交 GitHub。
+Drive 保存 state 是为了跨 Colab session 保留资源跟踪；state backup 同样保持私有。
+不要公开分享保存 state 的 Drive 文件、私有 tfvars、plan、credential 或 notebook secret 输出。
+.gitignore 保护这些本地文件，但不会自动清除已被 Git 跟踪的文件或历史。
+
+首次 terraform init 会生成 infra/terraform/.terraform.lock.hcl。
+它锁定当前官方 runpod/runpod 1.0.8 的解析版本与校验信息，
+**应当审阅并提交 Git**，可先下载回本地 VS Code 再提交，供以后 clone 使用。
+本补丁没有伪造或预先生成该文件。
+
+不要提交 infra/terraform/.terraform/；它是本地工作目录，包含 backend 初始化信息。
+不要提交 *.tfstate、*.tfstate.*、*.tfvars、*.tfvars.json、*.tfplan、crash logs、
+rclone.conf、*.credentials.json、service-account*.json、.env 或 .env.*。
+terraform.tfvars.example 与 .terraform.lock.hcl 明确不被 ignore。
 
 ## 5. RunPod Console：三个 Pod 填什么
 
@@ -428,8 +680,14 @@ UTC/monotonic 时间记录和结果 schema 沿用既有实现，W8A8 不进入�
 
 ## 11. 静态 review 与人工验证边界
 
-本次修改三个 bootstrap、本文档以及 Terraform 的变量/locals/outputs/example。
+本次 deployment-safety patch 只新增根目录 .gitignore，并修改 versions.tf 与本文档。
+三个 bootstrap、Network Volume resource、variables/outputs、benchmark、SLO、serving、
+quality evaluation、Compose、observability configs 与根目录 README 均未修改。
 没有新增 Dockerfile、image 构建流程、测试或新的 Python module。
+
+静态核对：local backend 不写死 Drive 路径；Provider 仍为 runpod/runpod = 1.0.8；
+.gitignore 保护 state/tfvars/plan/credentials，但保留 provider lock 与 tfvars example；
+Colab Secrets 示例只输出加载状态；首次 plan 预期仅新增一个 Network Volume。
 
 尚未运行或验证：镜像实际 dependency versions、Console JSON 执行、driver、rclone
 权限/复制、Prometheus scrape、Grafana API 与真实 benchmark。

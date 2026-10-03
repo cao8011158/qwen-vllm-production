@@ -1,0 +1,36 @@
+# Terraform working directory
+.terraform/
+
+# Terraform state and backups
+*.tfstate
+*.tfstate.*
+
+# Private Terraform variables
+*.tfvars
+*.tfvars.json
+
+# Saved Terraform plans
+*.tfplan
+
+# Terraform crash logs
+crash.log
+crash.*.log
+
+# rclone / cloud credentials
+rclone.conf
+*.credentials.json
+service-account*.json
+
+# Local secrets
+.env
+.env.*
+
+# Local Python environments and bytecode
+.venv/
+.venv-benchmark/
+__pycache__/
+*.py[cod]
+
+# Commit the provider lock and example variables
+!.terraform.lock.hcl
+!terraform.tfvars.example
