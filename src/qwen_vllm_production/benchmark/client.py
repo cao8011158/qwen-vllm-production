@@ -39,6 +39,7 @@ class StreamingClient:
             request_id=request_id, model=self.model, concurrency=concurrency,
             worker_id=worker_id, start_timestamp=utc_now(),
             prompt_tokens=prompt.prompt_tokens, prompt_sha256=prompt.sha256,
+            requested_output_tokens=self.output_tokens,
         )
         start = self.clock()
         result.request_start_monotonic_seconds = start
@@ -80,6 +81,11 @@ class StreamingClient:
             for choice in choices:
                 if not isinstance(choice, dict):
                     raise StreamProtocolError("Unexpected choice payload.")
+                # The final choice often has empty content but carries these reasons.
+                if choice.get("finish_reason") is not None:
+                    result.finish_reason = choice["finish_reason"]
+                if choice.get("stop_reason") is not None:
+                    result.stop_reason = choice["stop_reason"]
                 delta = choice.get("delta", {})
                 if not isinstance(delta, dict):
                     raise StreamProtocolError("Unexpected delta payload.")
@@ -104,6 +110,7 @@ class StreamingClient:
                         "temperature": 0.0, "max_tokens": self.output_tokens,
                         "stream": True, "stream_options": {"include_usage": True},
                         "ignore_eos": self.ignore_eos,
+                        "add_special_tokens": False,
                     },
                 ) as response:
                     result.http_status = response.status_code
@@ -136,6 +143,7 @@ class StreamingClient:
             else:
                 result.output_tokens = len(self.tokenizer.encode(result.generated_text, add_special_tokens=False))
                 result.output_token_count_source = "tokenizer_fallback"
+            result.output_length_complete = result.output_tokens == result.requested_output_tokens
             if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool) and prompt_tokens > 0:
                 result.prompt_tokens = prompt_tokens
                 result.prompt_token_count_source = "api_usage"

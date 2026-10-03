@@ -35,6 +35,10 @@ class RequestResult:
     request_start_monotonic_seconds: float | None = None
     first_content_monotonic_seconds: float | None = None
     stream_complete_monotonic_seconds: float | None = None
+    requested_output_tokens: int | None = None
+    output_length_complete: bool | None = None
+    finish_reason: str | None = None
+    stop_reason: str | int | None = None
 
 
 def latency_metrics(start: float, first: float, end: float, output_tokens: int) -> dict:

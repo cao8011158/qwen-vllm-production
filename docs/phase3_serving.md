@@ -12,13 +12,15 @@ One launcher builds an argument vector for the official vLLM CLI:
 ~~~text
 vllm serve MODEL_PATH --served-model-name qwen3-14b
   --max-model-len 8192 --gpu-memory-utilization 0.90
-  --tensor-parallel-size 1 --host 0.0.0.0 --port 8000 --dtype auto
+  --tensor-parallel-size 1 --host 0.0.0.0 --port 8000 --dtype bfloat16 --seed 42
   --no-enable-prefix-caching
 ~~~
 
 CLI flags override MODEL_PATH, SERVED_MODEL_NAME, MAX_MODEL_LEN,
-GPU_MEMORY_UTILIZATION, TENSOR_PARALLEL_SIZE, HOST and PORT environment
-variables. MODEL_PATH is required. No quantization override is added:
+GPU_MEMORY_UTILIZATION, TENSOR_PARALLEL_SIZE, HOST, PORT, DTYPE, SEED and
+MODEL_REVISION environment variables. DTYPE defaults to bfloat16 and SEED to
+42. --model-revision adds --revision to vLLM only when non-empty; local
+checkpoints can leave it empty. MODEL_PATH is required. No quantization override is added:
 vLLM reads the checkpoint's quantization configuration. Only one GPU is
 accepted in this phase. The launcher replaces itself with the official CLI;
 it adds no inference layer, exporter or HTTP server.
@@ -27,6 +29,8 @@ Use the same alias and configuration for both checkpoints. The benchmark
 records the declared serving settings; it does not remotely change or prove
 those settings. Confirm the actual model path, dtype, quantization and engine
 configuration in the server startup log.
+Record matching --dtype, --serving-seed and --model-revision in the benchmark
+CLI. Its --seed controls workload generation, separately from the vLLM seed.
 
 ## Workload and endpoint
 
@@ -46,6 +50,8 @@ endpoint. This is an explicit choice among the official OpenAI-compatible
 generation endpoints: chat messages are rendered locally, and the server
 must not render them a second time. The stream parser also understands
 delta.content chunks, but Phase 3A CLI deliberately selects completions.
+Every request explicitly sets add_special_tokens=False so the server does
+not add special tokens to the already rendered prompt.
 
 The shared launcher fixes prefix caching OFF. A sweep deliberately reuses
 the same saved prompt sequence, so leaving prefix caching enabled could make
@@ -83,9 +89,9 @@ and monotonic receive times are saved in each measured raw record.
 | TPOT, ms/token | (E2E - TTFT) / (output_tokens - 1), only for successful requests with output_tokens > 1 |
 | Success rate | Successful measured requests / all measured requests |
 | SLO attainment | Successful requests meeting all three latency SLOs / successful requests |
-| Throughput, req/s | Successful measured requests / measured wall-clock seconds |
-| Output tokens/s | Sum of successful output tokens / measured wall-clock seconds |
-| Goodput, req/s | Successful measured requests meeting all latency SLOs / measured wall-clock seconds |
+| Throughput, req/s | Successful measured requests / measured elapsed seconds (monotonic) |
+| Output tokens/s | Sum of successful output tokens / measured elapsed seconds (monotonic) |
+| Goodput, req/s | Successful measured requests meeting all latency SLOs / measured elapsed seconds (monotonic) |
 
 Empty events, role-only events, metadata-only events and empty content do not
 start TTFT. Byte boundaries may split UTF-8, SSE frames or JSON. Multiple
@@ -100,6 +106,12 @@ The source is explicitly api_usage or tokenizer_fallback. Fallback
 retokenization is deterministic but may differ from the original generated
 token sequence; prefer API usage for formal results. Prompt counts also
 record whether they came from API usage or the local tokenizer.
+Raw records also retain finish_reason and stop_reason when supplied, including
+on final choices with empty content, and requested_output_tokens.
+output_length_complete compares the counted output_tokens with the requested
+target; it is null when no count is available. Inspect incomplete outputs
+against the 256-token target. Short outputs remain recorded and do not change
+the existing request-success or latency-SLO definitions.
 
 TPOT is null for output_tokens <= 1 and excluded from TPOT percentiles.
 Such requests are conservatively non-compliant. If no requests succeed,
@@ -128,6 +140,9 @@ raw records, latency statistics, rates and measured duration. The measured
 interval begins immediately before creating measured workers and ends when
 all measured workers finish. Workload preparation and file writes are outside
 that interval. Warmup attempt/success/failure counts are separate metadata.
+Aggregate measurement_start_utc and measurement_end_utc mark that interval
+in wall-clock UTC for Prometheus/Grafana alignment. Duration and all latency
+calculations continue to use the monotonic clock.
 
 Each manually named run creates a new directory; an existing run is rejected:
 
@@ -143,7 +158,11 @@ results/serving/<output-subdirectory>/<run-id>/
 
 The sweep launcher requires explicit --concurrency-levels. It runs each point
 sequentially with the same workload and warmup count. The summarizer rejects
-mixed protocols or duplicate concurrency values. Maximum compliant concurrency
+mixed protocols or duplicate concurrency values. Protocol checks include base
+URL, package versions, tokenizer, temperature, local
+template/thinking/special-token settings, dtype, serving seed and revision.
+Missing metadata cannot be mixed with a present field.
+Maximum compliant concurrency
 and maximum compliant goodput are computed independently. Their locations
 can differ; ties in goodput choose lower concurrency. If nothing passes, all
 three maximum/location fields are null. A small Colab sample is insufficient
@@ -211,15 +230,28 @@ experiment is added.
 
 The supplied validated versions are pinned for vLLM 0.26.0,
 compressed-tensors 0.17.0, transformers 5.17.0, lm-eval 0.4.13 and datasets
-4.8.5. Torch's public version is constrained to 2.11.0 in the evaluation
-extra; the supplied +cu130 build is a platform-specific wheel choice and
-must be checked after resolving on Linux. This implementation does not
-rewrite a CUDA index or create uv.lock. Pin the resolved HTTP/test/tool
-versions in a real lock after integration succeeds.
+4.8.5. Torch's public version remains constrained to 2.11.0. For Linux x86_64
+(Colab/RunPod), tool.uv.sources maps torch to the explicit pytorch-cu130 index
+at https://download.pytorch.org/whl/cu130; other packages retain their normal
+sources. The public-version constraint permits the +cu130 local version.
+Regenerate uv.lock with uv lock, then install with uv sync --locked.
+No lock was generated or edited here. Manually verify that resolution selected
+torch 2.11.0+cu130, CUDA runtime 13.0 and a compatible driver before integration.
+Wheel availability and dependency compatibility were not checked over the
+network. Preserve the resolved HTTP/test/tool versions in the lock.
 
-Phase 3 defaults live in the new modules. The existing Phase 1/2 config YAML
-is not reinterpreted by the new launcher or runner; its legacy quality and
-workload sections are not used for Phase 3.
+configs/config.yaml now agrees with the 97% quality threshold and the
+1000/256/8192 primary workload, GPU utilization 0.90 and TP=1. It no longer
+contains structured-output settings or the unused long_context workload.
+The launcher and runner still take their settings from their existing CLI
+(and, for the launcher, environment), rather than loading this YAML.
+
+The repository currently declares model.revision=main, not an immutable SHA.
+Before formal RunPod benchmarking, recover the real immutable Hugging Face
+revision used as the AWQ source and pin BF16 to it with MODEL_REVISION.
+Use the matching tokenizer snapshot and record --model-revision in benchmark
+metadata. A missing revision is saved as null, with the BF16 formal-run
+requirement also recorded; no commit SHA has been invented.
 
 Formal BF16/AWQ experiments must reuse the physical A100 SXM 80GB, session
 where practical, future image, CUDA/vLLM versions, serving arguments, local

@@ -17,6 +17,9 @@ class ServingConfig:
     tensor_parallel_size: int = 1
     host: str = "0.0.0.0"
     port: int = 8000
+    dtype: str = "bfloat16"
+    seed: int = 42
+    model_revision: str | None = None
 
     def __post_init__(self) -> None:
         if not self.model_path.strip():
@@ -31,6 +34,8 @@ class ServingConfig:
             raise ValueError("Phase 3A supports one GPU: TENSOR_PARALLEL_SIZE must be 1.")
         if not 1 <= self.port <= 65535:
             raise ValueError("PORT must be in [1, 65535].")
+        if not self.dtype.strip():
+            raise ValueError("DTYPE / --dtype must not be empty.")
 
 
 def parse_config(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None) -> ServingConfig:
@@ -45,9 +50,13 @@ def parse_config(argv: Sequence[str] | None = None, env: Mapping[str, str] | Non
         ("tensor-parallel-size", "TENSOR_PARALLEL_SIZE", "1", int),
         ("host", "HOST", "0.0.0.0", str),
         ("port", "PORT", "8000", int),
+        ("dtype", "DTYPE", "bfloat16", str),
+        ("seed", "SEED", "42", int),
+        ("model-revision", "MODEL_REVISION", "", str),
     ):
         parser.add_argument("--" + flag, default=env.get(variable, default), type=kind)
     args = parser.parse_args(argv)
+    args.model_revision = args.model_revision.strip() or None
     try:
         return ServingConfig(**vars(args))
     except ValueError as exc:
@@ -56,15 +65,19 @@ def parse_config(argv: Sequence[str] | None = None, env: Mapping[str, str] | Non
 
 def build_command(config: ServingConfig) -> list[str]:
     """No variant branch or quantization override: vLLM reads checkpoint config."""
-    return [
+    command = [
         "vllm", "serve", config.model_path,
         "--served-model-name", config.served_model_name,
         "--max-model-len", str(config.max_model_len),
         "--gpu-memory-utilization", str(config.gpu_memory_utilization),
         "--tensor-parallel-size", str(config.tensor_parallel_size),
-        "--host", config.host, "--port", str(config.port), "--dtype", "auto",
+        "--host", config.host, "--port", str(config.port), "--dtype", config.dtype,
+        "--seed", str(config.seed),
         "--no-enable-prefix-caching",
     ]
+    if config.model_revision and config.model_revision.strip():
+        command.extend(["--revision", config.model_revision.strip()])
+    return command
 
 
 def main() -> None:

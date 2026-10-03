@@ -65,12 +65,20 @@ def test_failures_excluded_and_no_success_safe() -> None:
 
 def test_raw_and_aggregate_json(tmp_path: Path) -> None:
     record = make_result(0)
+    record.requested_output_tokens = 256
+    record.output_length_complete = True
+    record.finish_reason = "length"
+    record.stop_reason = None
     result = aggregate([record], model="model", concurrency=4, duration_seconds=1)
     save_json({"requests": [asdict(record)]}, tmp_path / "raw.json")
     save_json(result, tmp_path / "aggregate.json")
     raw = json.loads((tmp_path / "raw.json").read_text(encoding="utf-8"))
     saved = json.loads((tmp_path / "aggregate.json").read_text(encoding="utf-8"))
     assert raw["requests"][0]["output_tokens"] == 256
+    assert raw["requests"][0]["requested_output_tokens"] == 256
+    assert raw["requests"][0]["output_length_complete"] is True
+    assert raw["requests"][0]["finish_reason"] == "length"
+    assert raw["requests"][0]["stop_reason"] is None
     assert saved["slo_compliant_operating_point"] is True
 
 

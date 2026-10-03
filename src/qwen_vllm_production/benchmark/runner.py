@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..evaluation.common import package_versions, save_json
-from .client import StreamingClient
+from .client import StreamingClient, utc_now
 from .metrics import aggregate
 from .sweep import closed_loop, summarize_points
 from .workload import build_workload, load_local_tokenizer, validate_workload
@@ -50,6 +50,10 @@ def build_parser(*, sweep: bool = False) -> argparse.ArgumentParser:
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.90, help="Record the server's configured value.")
     parser.add_argument("--tensor-parallel-size", type=int, default=1, help="Record the server's configured value; Phase 3A uses 1.")
     parser.add_argument("--checkpoint-path", help="Record the server's Hub ID or checkpoint path; not loaded by the client.")
+    parser.add_argument("--dtype", default="bfloat16", help="Record the server's configured dtype.")
+    parser.add_argument("--serving-seed", type=int, default=42, help="Record the vLLM seed, separately from the workload seed.")
+    parser.add_argument("--model-revision", type=lambda value: value.strip() or None,
+                        help="Record the server's revision; formal BF16 runs require an immutable revision matching the AWQ source.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--allow-early-eos", action="store_true", help="Change the fixed-output workload; use identically for both variants.")
     parser.add_argument("--workload-file", type=Path, help="Reuse and validate an already saved prompt sequence.")
@@ -62,19 +66,23 @@ def build_parser(*, sweep: bool = False) -> argparse.ArgumentParser:
     return parser
 
 
-async def run_point(client: StreamingClient, prompts: list, *, concurrency: int, warmup_requests: int, metadata: dict, clock=time.perf_counter) -> tuple[list, dict]:
+async def run_point(client: StreamingClient, prompts: list, *, concurrency: int, warmup_requests: int, metadata: dict, clock=time.perf_counter, utc_clock=utc_now) -> tuple[list, dict]:
     warmup = await closed_loop(prompts[:warmup_requests], concurrency, client.send, model=client.model)
     # The measured interval spans worker scheduling through the final measured request.
     # Workload/tokenizer setup, warmup, file writes and monitoring checks are outside it.
+    measurement_start_utc = utc_clock()
     start = clock()
     requests = await closed_loop(prompts[warmup_requests:], concurrency, client.send, model=client.model)
     duration = clock() - start
+    measurement_end_utc = utc_clock()
     point_metadata = {
         **metadata,
         "warmup_requests": warmup_requests,
         "warmup_successful": sum(result.success for result in warmup),
         "warmup_failed": sum(not result.success for result in warmup),
         "duration_boundary": "before measured workers start until all measured workers finish",
+        "measurement_start_utc": measurement_start_utc,
+        "measurement_end_utc": measurement_end_utc,
     }
     return requests, aggregate(
         requests, model=client.model, concurrency=concurrency,
@@ -127,7 +135,12 @@ async def run(args: argparse.Namespace, *, sweep: bool = False) -> Path:
         "max_model_len": args.max_model_len, "tokenizer_path": args.tokenizer_path,
         "tensor_parallel_size": args.tensor_parallel_size,
         "gpu_memory_utilization": args.gpu_memory_utilization,
-        "dtype_configuration": "auto", "checkpoint_path": args.checkpoint_path,
+        "dtype_configuration": args.dtype, "checkpoint_path": args.checkpoint_path,
+        "serving_seed": args.serving_seed, "model_revision": args.model_revision,
+        "model_revision_requirement": (
+            "Formal BF16 RunPod runs require an immutable Hugging Face revision matching the AWQ source model."
+            if args.variant == "bf16" else None
+        ),
         "prefix_caching": False,
         "timeout_seconds": args.timeout,
         "serving_config_source": "operator-declared; launch with the same values",
@@ -135,6 +148,7 @@ async def run(args: argparse.Namespace, *, sweep: bool = False) -> Path:
         "base_url": args.base_url, "request_path": args.request_path,
         "temperature": 0.0, "ignore_eos": not args.allow_early_eos,
         "chat_template_applied_locally": True, "enable_thinking": False,
+        "add_special_tokens": False,
         "monitoring_enabled": args.monitoring_enabled,
         "prometheus_url": args.prometheus_url if args.monitoring_enabled else None,
         "grafana_url": args.grafana_url if args.monitoring_enabled else None,

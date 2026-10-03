@@ -44,6 +44,7 @@ def measure(chunks: list[bytes], *, status: int = 200, error: Exception | None =
         def handle(request):
             payload = json.loads(request.content)
             assert payload["stream_options"]["include_usage"] is True
+            assert payload["add_special_tokens"] is False
             return httpx.Response(status, headers={"content-type": "text/event-stream"}, stream=FakeBytes(chunks, error))
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
@@ -77,6 +78,30 @@ def test_partial_bytes_and_tokenizer_fallback() -> None:
     assert result.success
     assert result.output_tokens == 2
     assert result.output_token_count_source == "tokenizer_fallback"
+    assert result.requested_output_tokens == 256
+    assert result.output_length_complete is False
+
+
+@pytest.mark.parametrize("count,complete,finish,stop", [
+    (256, True, "length", None),
+    (12, False, "stop", 123),
+    (12, False, "stop", "end-of-turn"),
+])
+def test_final_empty_choice_preserves_reasons_and_output_length(count, complete, finish, stop) -> None:
+    result = measure([
+        event({"choices": [{"text": "hello world"}]}),
+        event({"choices": [{"text": "", "finish_reason": finish, "stop_reason": stop}]}),
+        event({"choices": [], "usage": {"completion_tokens": count}}),
+        event("[DONE]"),
+    ])
+    assert result.success
+    assert result.slo_compliant
+    assert result.finish_reason == finish
+    assert result.stop_reason == stop
+    assert result.requested_output_tokens == 256
+    assert result.output_tokens == count
+    assert result.output_length_complete is complete
+    assert result.generated_text == "hello world"
 
 
 @pytest.mark.parametrize("chunks", [
@@ -93,6 +118,8 @@ def test_stream_failures_are_preserved(chunks: list[bytes]) -> None:
     assert result.error_type == "StreamProtocolError"
     assert result.error_message
     assert not result.slo_compliant
+    assert result.requested_output_tokens == 256
+    assert result.output_length_complete is None
 
 
 def test_http_error_and_timeout_are_results() -> None:

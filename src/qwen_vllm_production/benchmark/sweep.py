@@ -59,9 +59,13 @@ def summarize_points(points: list[dict]) -> dict:
         "tensor_parallel_size", "gpu_memory_utilization", "dtype_configuration",
         "checkpoint_path", "timeout_seconds",
         "prefix_caching",
+        "base_url", "package_versions", "tokenizer_path", "temperature",
+        "chat_template_applied_locally", "enable_thinking", "serving_seed",
+        "model_revision", "add_special_tokens",
     )
     for key in controls:
-        if any(point.get(key) != points[0].get(key) for point in points):
+        if any((key in point) != (key in points[0]) or point.get(key) != points[0].get(key)
+               for point in points):
             raise ValueError(f"Cannot summarize different experimental protocols: {key}.")
     if len({point["concurrency"] for point in points}) != len(points):
         raise ValueError("Each concurrency must appear once in a sweep summary.")

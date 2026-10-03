@@ -31,7 +31,7 @@ pip install uv
 
 # Resolve on Linux/Colab. Codex has not generated or modified uv.lock.
 uv lock
-uv sync --extra serving --extra benchmark --extra test
+uv sync --locked --extra serving --extra benchmark --extra test
 
 export PATH="$PWD/.venv/bin:$PATH"
 export TOKENIZER_PATH=/content/models/qwen3-14b/awq_w4a16
@@ -39,6 +39,10 @@ export SERVED_MODEL_NAME=qwen3-14b
 export MAX_MODEL_LEN=8192
 export GPU_MEMORY_UTILIZATION=0.90
 export TENSOR_PARALLEL_SIZE=1
+export DTYPE=bfloat16
+export SEED=42
+# Local AWQ checkpoints can leave this empty. See the BF16 revision requirement below.
+export MODEL_REVISION=""
 export HOST=0.0.0.0
 export PORT=8000
 export CUDA_VISIBLE_DEVICES=0
@@ -61,9 +65,11 @@ To include Phase 2 dependencies as well:
 uv sync --locked --extra evaluation --extra serving --extra benchmark --extra test
 ~~~
 
-An editable pip alternative in an already compatible Colab environment is:
+An editable pip alternative in an already compatible Colab environment is
+below. pip does not read tool.uv.sources, so select the CUDA wheel explicitly:
 
 ~~~bash
+pip install --index-url https://download.pytorch.org/whl/cu130 "torch==2.11.0"
 pip install -e ".[serving,benchmark,test]"
 ~~~
 
@@ -82,11 +88,13 @@ PY
 ~~~
 
 Expected supplied versions include vllm 0.26.0, compressed-tensors 0.17.0,
-transformers 5.17.0 and torch 2.11.0+cu130. Torch's local +cu130 suffix and
-CUDA wheel/index selection are not guaranteed by a public-version pin:
-verify the resolver's actual result and compatible driver. Stop and resolve
-version/driver mismatches before collecting experimental data. The serving
-extra obtains torch through vLLM's dependency constraints.
+transformers 5.17.0 and torch 2.11.0+cu130, with torch.version.cuda == "13.0".
+pyproject.toml maps torch to the explicit pytorch-cu130 index for Linux
+x86_64; it keeps the public 2.11.0 pin, which permits the +cu130 local version.
+Other packages use their normal sources. Wheel availability and resolution
+have not been verified here: confirm the actual result and compatible driver.
+Stop and resolve version/driver mismatches before collecting experimental
+data. The serving extra obtains torch through vLLM's dependency constraints.
 
 ## 2. New CPU/mock unit tests first
 
@@ -122,7 +130,7 @@ setsid python scripts/serve_vllm.py \
   > "$LOG_DIR/vllm-awq.log" 2>&1 &
 echo $! > "$LOG_DIR/vllm-awq.pid"
 
-# Inspect actual engine, quantization, dtype and context settings.
+# Inspect actual engine, quantization, bfloat16 dtype, seed 42 and context settings.
 tail -n 60 "$LOG_DIR/vllm-awq.log"
 ~~~
 
@@ -153,7 +161,10 @@ do not treat a running process alone as readiness.
 
 This one-request run verifies the selected official /v1/completions endpoint,
 locally rendered Qwen chat template, non-empty generated content, expected
-model alias, streaming [DONE], and usage/fallback token counting.
+model alias, streaming [DONE], and usage/fallback token counting. Requests
+explicitly set add_special_tokens=False, matching local prompt tokenization.
+Benchmark --dtype, --serving-seed and --model-revision must match the launcher;
+--seed remains the separate workload seed.
 
 ~~~bash
 python scripts/benchmark_serving.py \
@@ -163,6 +174,7 @@ python scripts/benchmark_serving.py \
   --concurrency 1 --num-requests 1 --warmup-requests 0 \
   --input-tokens 1000 --output-tokens 256 --seed 42 \
   --max-model-len 8192 --timeout 120 \
+  --dtype "$DTYPE" --serving-seed "$SEED" --model-revision "$MODEL_REVISION" \
   --output-dir results/serving/colab --run-id awq-single
 
 python - <<'PY'
@@ -173,7 +185,11 @@ assert record["success"], record
 assert record["model"] == "qwen3-14b"
 assert record["generated_text"].strip()
 assert record["ttft_ms"] is not None and record["output_tokens"] > 0
+assert record["requested_output_tokens"] == 256
+assert record["output_length_complete"] == (record["output_tokens"] == 256)
 print("First streaming request:", record["output_token_count_source"], record["ttft_ms"], record["e2e_ms"])
+print("Output length:", record["output_tokens"], record["output_length_complete"],
+      "finish/stop:", record["finish_reason"], record["stop_reason"])
 PY
 
 # Capture after generation so lazily exported histogram families can be present.
@@ -339,6 +355,7 @@ python scripts/benchmark_serving.py \
   --concurrency 1 --num-requests 20 --warmup-requests 3 \
   --timeout 120 --input-tokens 1000 --output-tokens 256 --seed 42 \
   --max-model-len 8192 --gpu-memory-utilization 0.90 --tensor-parallel-size 1 \
+  --dtype "$DTYPE" --serving-seed "$SEED" --model-revision "$MODEL_REVISION" \
   --monitoring-enabled --prometheus-url "$PROMETHEUS_URL" --grafana-url "$GRAFANA_URL" \
   --prometheus-scrape-interval-seconds 5 \
   --output-dir results/serving/colab --run-id awq-c1
@@ -351,6 +368,7 @@ python scripts/benchmark_serving.py \
   --concurrency 4 --num-requests 20 --warmup-requests 3 \
   --timeout 120 --input-tokens 1000 --output-tokens 256 --seed 42 \
   --max-model-len 8192 --gpu-memory-utilization 0.90 --tensor-parallel-size 1 \
+  --dtype "$DTYPE" --serving-seed "$SEED" --model-revision "$MODEL_REVISION" \
   --monitoring-enabled --prometheus-url "$PROMETHEUS_URL" --grafana-url "$GRAFANA_URL" \
   --prometheus-scrape-interval-seconds 5 \
   --output-dir results/serving/colab --run-id awq-c4
@@ -370,6 +388,7 @@ keeping the same 20 requests and saved workload. Do not run the formal
 ~~~bash
 python - <<'PY'
 import json, math
+from datetime import datetime, timedelta
 from pathlib import Path
 
 def reject_constant(value):
@@ -401,6 +420,12 @@ for name, concurrency in (("awq-c1", 1), ("awq-c4", 4)):
     assert aggregate["prometheus_scrape_interval_seconds"] == 5
     assert aggregate["warmup_requests"] == 3
     assert aggregate["max_model_len"] == 8192
+    assert aggregate["dtype_configuration"] == "bfloat16"
+    assert aggregate["serving_seed"] == 42
+    assert aggregate["add_special_tokens"] is False
+    for key in ("measurement_start_utc", "measurement_end_utc"):
+        assert datetime.fromisoformat(aggregate[key]).utcoffset() == timedelta(0)
+    # UTC bounds align monitoring; never derive performance duration from them.
     digests.append(aggregate["workload_sha256"])
     successful = [record for record in raw if record["success"]]
     compliant = [record for record in successful if record["slo_compliant"]]
@@ -413,8 +438,12 @@ for name, concurrency in (("awq-c1", 1), ("awq-c4", 4)):
     for record in raw:
         for key in ("request_id", "http_status", "prompt_tokens", "output_tokens",
                     "output_token_count_source", "ttft_ms", "tpot_ms_per_token",
-                    "e2e_ms", "slo_compliant", "error_type", "error_message", "start_timestamp"):
+                    "e2e_ms", "slo_compliant", "error_type", "error_message", "start_timestamp",
+                    "finish_reason", "stop_reason", "requested_output_tokens", "output_length_complete"):
             assert key in record
+        assert record["requested_output_tokens"] == 256
+        if record["output_tokens"] is not None:
+            assert record["output_length_complete"] == (record["output_tokens"] == record["requested_output_tokens"])
         if record["success"]:
             assert record["output_token_count_source"] in ("api_usage", "tokenizer_fallback")
             assert record["ttft_ms"] >= 0 and record["e2e_ms"] >= record["ttft_ms"]
@@ -438,6 +467,9 @@ PY
 Inspect failures rather than discarding them. Compare API prompt token
 counts against the locally counted lengths in workload.json. Unexpected
 differences mean tokenizer or endpoint special-token handling needs review.
+Inspect finish_reason, stop_reason and every output_length_complete=False
+record for unexpected short output. Incomplete outputs are retained; these
+checks do not redefine success, latency compliance or goodput.
 
 ## 10. Observe load in Prometheus and Grafana
 
@@ -493,6 +525,12 @@ being copied into aggregate JSON.
 
 Only use the PID/group recorded by this session's launcher. Confirm it belongs
 to this AWQ server before sending the signal; do not reuse an old PID file.
+The repository's revision=main is mutable. Before a formal RunPod comparison,
+set MODEL_REVISION to the actual immutable Hugging Face revision used to
+produce AWQ and use its matching tokenizer snapshot. No SHA is supplied here.
+An empty value is permitted for this development smoke, but is not a pinned
+formal baseline. The launcher forwards non-empty MODEL_REVISION as --revision;
+the benchmark records the same value through --model-revision.
 
 ~~~bash
 ps -p "$(cat "$LOG_DIR/vllm-awq.pid")" -o pid,pgid,args
@@ -527,6 +565,7 @@ python scripts/benchmark_serving.py \
   --base-url http://127.0.0.1:8000 --model "$SERVED_MODEL_NAME" \
   --variant bf16 --checkpoint-path "$MODEL_PATH" --tokenizer-path "$TOKENIZER_PATH" \
   --concurrency 1 --num-requests 1 --warmup-requests 0 \
+  --dtype "$DTYPE" --serving-seed "$SEED" --model-revision "$MODEL_REVISION" \
   --output-dir results/serving/colab --run-id bf16-single
 
 python scripts/benchmark_serving.py \
@@ -536,6 +575,7 @@ python scripts/benchmark_serving.py \
   --concurrency 1 --num-requests 20 --warmup-requests 3 \
   --timeout 120 --input-tokens 1000 --output-tokens 256 --seed 42 \
   --max-model-len 8192 --gpu-memory-utilization 0.90 --tensor-parallel-size 1 \
+  --dtype "$DTYPE" --serving-seed "$SEED" --model-revision "$MODEL_REVISION" \
   --monitoring-enabled --prometheus-url "$PROMETHEUS_URL" --grafana-url "$GRAFANA_URL" \
   --prometheus-scrape-interval-seconds 5 \
   --output-dir results/serving/colab --run-id bf16-c1
@@ -566,6 +606,8 @@ serving implementation, future image, CUDA environment, versions, engine
 settings, tokenizer, saved workload, output policy, request counts, warmup,
 concurrency levels and monitoring configuration for BF16 and AWQ.
 Prometheus/Grafana remain enabled. Docker/deployment are intentionally absent.
+Pin BF16 to the real immutable AWQ source revision before collecting formal
+data; record that revision, bfloat16 dtype and serving seed 42 in metadata.
 
 The following command is a future formal example, **not a Colab smoke step**:
 
@@ -578,6 +620,7 @@ python scripts/benchmark_sweep.py \
   --num-requests 1000 --warmup-requests 5 \
   --input-tokens 1000 --output-tokens 256 --seed 42 \
   --max-model-len 8192 --gpu-memory-utilization 0.90 --tensor-parallel-size 1 \
+  --dtype bfloat16 --serving-seed 42 \
   --monitoring-enabled \
   --output-dir results/serving/formal --run-id awq-formal
 ~~~
