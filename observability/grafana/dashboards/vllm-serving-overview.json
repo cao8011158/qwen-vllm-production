@@ -1,0 +1,34 @@
+{
+  "uid": "vllm-serving-overview",
+  "title": "vLLM Serving Overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "tags": ["vllm", "phase3a"],
+  "timezone": "utc",
+  "refresh": "5s",
+  "time": {"from": "now-15m", "to": "now"},
+  "description": "Bootstrap dashboard. Run scripts/prepare_dashboard.py against an actual vLLM metrics snapshot before provisioning the full serving overview.",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "vLLM Scrape Target UP",
+      "datasource": {"type": "prometheus", "uid": "vllm-prometheus"},
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 6},
+      "targets": [{"refId": "A", "expr": "up{job=\"vllm\"}"}],
+      "fieldConfig": {"defaults": {"min": 0, "max": 1}, "overrides": []}
+    },
+    {
+      "id": 2,
+      "type": "text",
+      "title": "Prepare runtime-verified serving panels",
+      "gridPos": {"x": 6, "y": 0, "w": 18, "h": 6},
+      "options": {
+        "mode": "markdown",
+        "content": "Generate this dashboard with scripts/prepare_dashboard.py using the running vLLM 0.26.0 /metrics snapshot. The generator includes running/waiting requests, KV cache, latency histograms, token rates, request activity and queue/prefill/decode only when their real TYPE descriptors are present. Client benchmark JSON is the authoritative SLO measurement."
+      }
+    }
+  ],
+  "templating": {"list": []}
+}

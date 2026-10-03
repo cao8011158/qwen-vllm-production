@@ -1,0 +1,12 @@
+apiVersion: 1
+datasources:
+  - name: vLLM Prometheus
+    uid: vllm-prometheus
+    type: prometheus
+    access: proxy
+    url: ${PROMETHEUS_URL}
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: GET
+      timeInterval: 5s
