@@ -27,17 +27,9 @@ def request_compliant(
 
 
 def operating_point_compliant(result: dict, slo: PerformanceSLO = DEFAULT_SLO) -> bool:
-    checks = (
-        ("p95_ttft_ms", slo.ttft_ms, False),
-        ("p95_tpot_ms_per_token", slo.tpot_ms_per_token, False),
-        ("p95_e2e_ms", slo.e2e_ms, False),
-        ("request_success_rate", slo.request_success_rate, True),
-        ("slo_attainment_rate", slo.attainment_rate, True),
-    )
-    for key, threshold, minimum in checks:
-        value = result.get(key)
-        if value is None or not math.isfinite(value):
-            return False
-        if (minimum and value < threshold) or (not minimum and value > threshold):
-            return False
-    return True
+    """Gate on reliability and joint request-level attainment, not percentiles."""
+    success_rate = result.get("request_success_rate")
+    attainment_rate = result.get("slo_attainment_rate")
+    if any(value is None or not math.isfinite(value) for value in (success_rate, attainment_rate)):
+        return False
+    return success_rate >= slo.request_success_rate and attainment_rate >= slo.attainment_rate

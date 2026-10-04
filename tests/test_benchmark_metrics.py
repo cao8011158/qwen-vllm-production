@@ -49,6 +49,34 @@ def test_success_attainment_throughput_and_goodput() -> None:
     assert result["slo_compliant_operating_point"] is False
 
 
+def test_aggregate_attainment_passes_despite_tail_latency() -> None:
+    records = [make_result(index) for index in range(100)]
+    for record in records[95:]:
+        record.ttft_ms = 20000.0
+        record.e2e_ms = 80000.0
+        record.tpot_ms_per_token = 60000.0 / 255
+        record.slo_compliant = False
+
+    result = aggregate(records, model="model", concurrency=4, duration_seconds=240)
+    assert result["num_successful"] == 100
+    assert result["num_slo_compliant"] == 95
+    assert result["request_success_rate"] == 1.0
+    assert result["slo_attainment_rate"] == 0.95
+    assert result["slo_compliant_operating_point"] is True
+
+    # Type 7 rank 94.05 interpolates between the last compliant request and the tail.
+    assert result["p95_ttft_ms"] == pytest.approx(1095.0)
+    assert result["p95_ttft_ms"] > result["slo_thresholds"]["ttft_ms"]
+    assert result["p95_tpot_ms_per_token"] == pytest.approx(20 + 0.05 * (60000 / 255 - 20))
+    assert result["p95_e2e_ms"] == pytest.approx(8940.0)
+    assert result["p50_ttft_ms"] == 100.0
+    assert result["p50_tpot_ms_per_token"] == 20.0
+    assert result["p50_e2e_ms"] == 5200.0
+    assert result["goodput_requests_per_second"] == pytest.approx(95 / 240)
+    assert result["throughput_requests_per_second"] == pytest.approx(100 / 240)
+    assert result["output_tokens_per_second"] == pytest.approx(100 * 256 / 240)
+
+
 def test_failures_excluded_and_no_success_safe() -> None:
     success = make_result(0)
     failure = make_result(1, success=False)
@@ -80,6 +108,9 @@ def test_raw_and_aggregate_json(tmp_path: Path) -> None:
     assert raw["requests"][0]["finish_reason"] == "length"
     assert raw["requests"][0]["stop_reason"] is None
     assert saved["slo_compliant_operating_point"] is True
+    for field in ("ttft_ms", "tpot_ms_per_token", "e2e_ms"):
+        for prefix in ("p50_", "p95_"):
+            assert saved[prefix + field] == result[prefix + field]
 
 
 def test_single_token_success_is_not_slo_compliant() -> None:

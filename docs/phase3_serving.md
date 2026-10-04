@@ -124,10 +124,24 @@ Per-request compliance requires success AND TTFT <= 1000 ms AND
 TPOT <= 50 ms/token AND E2E <= 15000 ms. All metrics must be finite,
 non-negative and calculable.
 
-An operating point passes only if p95 TTFT <= 1000 ms, p95 TPOT <= 50 ms/token,
-p95 E2E <= 15000 ms, success rate >= 0.99, and attainment >= 0.95.
+Request-level SLO attainment is the number of successful requests meeting
+all three latency thresholds divided by the number of successful requests.
+Request success rate is successful measured requests divided by all measured
+requests. An operating point passes if and only if request success rate >= 0.99
+AND request-level SLO attainment >= 0.95; both rates must be present and finite.
+The result field remains slo_compliant_operating_point.
+
 Percentiles use successful requests only, linear interpolation at rank
-(n - 1) * q (type 7), with p50 and p95 saved.
+(n - 1) * q (type 7). p50 and p95 TTFT/TPOT/E2E values are still recorded and
+reported for descriptive and tail-latency analysis, model comparison and
+concurrency degradation analysis, but do not independently determine
+operating-point compliance. p95 latency is not an independent pass/fail gate.
+Throughput, output tokens/s and goodput remain reported. Goodput is the number
+of request-level SLO-compliant requests divided by measured duration, regardless
+of the operating-point boolean.
+
+configs/config.yaml names the request-level latency thresholds ttft_seconds,
+tpot_ms_per_token and e2e_seconds; these are not percentile thresholds.
 
 Concurrency C means C async workers. Each worker awaits its current request,
 then claims the next prompt. The number of outstanding requests never exceeds

@@ -61,9 +61,9 @@ slo:
   quality:
     recovery_minimum: 0.97
   latency:
-    p95_ttft_seconds: 1.0
-    p95_tpot_ms_per_token: 50
-    p95_e2e_seconds: 15
+    ttft_seconds: 1.0
+    tpot_ms_per_token: 50
+    e2e_seconds: 15
   reliability:
     request_success_rate: 0.99
     slo_attainment_rate: 0.95
