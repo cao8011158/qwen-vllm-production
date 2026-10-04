@@ -46,16 +46,16 @@ output "deployment_contract" {
       exposed_http_port = 8000
     }
     prometheus = {
-      id                       = var.prometheus_pod_id
-      image                    = "prom/prometheus:v3.5.0"
-      compute_type             = "CPU"
-      gpu_count                = 0
-      container_disk_gb        = 20
-      volume_disk_gb           = 0
-      data_path                = "/prometheus"
-      exposed_http_port        = 9090
-      external_config_tool     = "scripts/bootstrap_prometheus.sh"
-      console_start_command    = "Paste the generated prometheus-start-command.json"
+      id                    = var.prometheus_pod_id
+      image                 = "prom/prometheus:v3.5.0"
+      compute_type          = "CPU"
+      gpu_count             = 0
+      container_disk_gb     = 20
+      volume_disk_gb        = 0
+      data_path             = "/prometheus"
+      exposed_http_port     = 9090
+      external_config_tool  = "scripts/bootstrap_prometheus.sh"
+      console_start_command = "Paste the generated prometheus-start-command.json"
     }
     grafana = {
       id                    = var.grafana_pod_id
@@ -81,14 +81,14 @@ output "deployment_contract" {
 output "bootstrap_environment" {
   value = {
     gpu = {
-      REPOSITORY_URL     = var.repository_url
+      REPOSITORY_URL      = var.repository_url
       REPOSITORY_REVISION = var.repository_revision
-      GPU_BOOTSTRAP_URL  = local.gpu_bootstrap_url
+      GPU_BOOTSTRAP_URL   = local.gpu_bootstrap_url
       AWQ_SOURCE_REVISION = var.awq_source_revision
-      AWQ_GDRIVE_SOURCE  = var.awq_gdrive_source
-      NETWORK_VOLUME_ID = local.network_volume_id
-      MODEL_VARIANT     = "awq_w4a16"
-      RCLONE_CONFIG     = "/workspace/.secrets/rclone.conf"
+      AWQ_GDRIVE_SOURCE   = var.awq_gdrive_source
+      NETWORK_VOLUME_ID   = local.network_volume_id
+      MODEL_VARIANT       = "awq_w4a16"
+      RCLONE_CONFIG       = "/workspace/.secrets/rclone.conf"
     }
     prometheus = {}
     grafana = {
