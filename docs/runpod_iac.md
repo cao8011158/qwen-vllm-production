@@ -74,9 +74,11 @@ Template 在这里仅记录官方 image 和运行参数，不构建任何 image�
 
 镜像 tag 固定不代表所有 Python dependency 的精确版本都已得到运行时确认：
 [vLLM 官方 requirements](https://github.com/vllm-project/vllm/blob/v0.26.0/requirements/common.txt)
-对 transformers 使用下限。GPU bootstrap 将核对项目已经验证的四个版本；
-若不一致则停止，不通过 pip 替换官方 serving runtime。本次没有运行镜像，不能声称
-该 tag 的实际包、GPU driver 或 Console 集成已经验证通过。
+对 transformers 使用 >=5.5.3 下限。GPU bootstrap 精确核对 vLLM 0.26.0、
+compressed-tensors 0.17.0、torch 2.11.0 与 CUDA 13.0，并在两个 package validation
+block 中使用 packaging.version.Version 检查 transformers >=5.5.3。
+操作者当前确认该官方 runtime 包含 transformers 5.14.1，满足此下限；不要求 5.17.0。
+不通过 pip 替换官方 serving runtime。本次没有运行镜像，未验证 GPU driver 或 Console 集成。
 
 ## 3. 网络与存储
 
@@ -493,7 +495,8 @@ nohup 使服务不依赖 web terminal 会话；可查看 bootstrap-gpu.log 等�
 ### 6.2 bootstrap 做什么
 
 1. 从 PATH 发现官方 Python/vllm，确认 /workspace 为可写 mount，核对 GPU 与原有
-   vLLM=0.26.0、compressed-tensors=0.17.0、torch=2.11.0、transformers=5.17.0。
+   vLLM=0.26.0、compressed-tensors=0.17.0、torch=2.11.0、CUDA=13.0；
+   transformers 使用 Version 比较，要求 >=5.5.3。
 2. 必要时只安装 git/curl/util-linux 等 OS utilities。
 3. 首次 clone 实际 GitHub repository 到 /workspace/qwen-vllm-production，
    checkout 声明的 commit；已有 checkout 只核对 HEAD 和 tracked changes，
@@ -511,7 +514,8 @@ nohup 使服务不依赖 web terminal 会话；可查看 bootstrap-gpu.log 等�
 
 没有硬编码私有 Python 环境、预装 repository 或 image revision marker。
 client-env.sh 只设置 client Python 路径和 PYTHONPATH，不改变 PATH，也不激活 venv。
-runtime-packages.json 与 benchmark-requirements.txt 是运行时记录。
+runtime-packages.json 与 benchmark-requirements.txt 是运行时记录；前者保留实际的
+transformers 版本，不将其改写为最低版本或项目 dependency pin。
 
 ### 6.3 后续启动
 

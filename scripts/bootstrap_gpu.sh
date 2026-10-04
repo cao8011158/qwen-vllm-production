@@ -51,14 +51,19 @@ flock -n 8 || { echo "Serving already holds this volume; stop it before another 
 # Check the image's actual packages. A mismatch stops; no pip repair is attempted.
 "$RUNTIME_PYTHON" - <<'PY'
 from importlib.metadata import version
+from packaging.version import Version
 import torch
 
-expected = {"vllm": "0.26.0", "compressed-tensors": "0.17.0", "torch": "2.11.0", "transformers": "5.17.0"}
+expected = {"vllm": "0.26.0", "compressed-tensors": "0.17.0", "torch": "2.11.0"}
 for package, wanted in expected.items():
     actual = version(package)
     print(f"image: {package}={actual}")
     if actual.split("+", 1)[0] != wanted:
         raise SystemExit(f"Image package mismatch: expected {package} {wanted}; do not replace the serving stack.")
+transformers_version = version("transformers")
+print(f"image: transformers={transformers_version}")
+if Version(transformers_version) < Version("5.5.3"):
+    raise SystemExit(f"Image package mismatch: expected transformers >=5.5.3, found {transformers_version}; do not replace the serving stack.")
 if torch.version.cuda != "13.0":
     raise SystemExit(f"Expected the validated CUDA 13.0 wheel, found {torch.version.cuda}")
 if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
@@ -138,11 +143,15 @@ import json
 import sys
 from importlib.metadata import version
 from pathlib import Path
-expected = {"vllm": "0.26.0", "compressed-tensors": "0.17.0", "torch": "2.11.0", "transformers": "5.17.0"}
+from packaging.version import Version
+expected = {"vllm": "0.26.0", "compressed-tensors": "0.17.0", "torch": "2.11.0"}
 for package, wanted in expected.items():
     if version(package).split("+", 1)[0] != wanted:
         raise SystemExit(f"Client venv changed the visible core version: {package}")
-packages = {name: version(name) for name in (*expected, "httpx", "PyYAML")}
+transformers_version = version("transformers")
+if Version(transformers_version) < Version("5.5.3"):
+    raise SystemExit(f"Client venv requires transformers >=5.5.3, found {transformers_version}; do not replace the serving stack.")
+packages = {name: version(name) for name in (*expected, "transformers", "httpx", "PyYAML")}
 Path(sys.argv[1]).write_text(json.dumps(packages, indent=2) + "\n", encoding="utf-8")
 PY
 

@@ -87,7 +87,8 @@ print("GPU:", torch.cuda.get_device_name(0))
 PY
 ~~~
 
-Expected supplied versions include vllm 0.26.0, compressed-tensors 0.17.0,
+For the project-installed Colab environment above, supplied versions include
+vllm 0.26.0, compressed-tensors 0.17.0,
 transformers 5.17.0 and torch 2.11.0+cu130, with torch.version.cuda == "13.0".
 pyproject.toml maps torch to the explicit pytorch-cu130 index for Linux
 x86_64; it keeps the public 2.11.0 pin, which permits the +cu130 local version.
@@ -95,6 +96,12 @@ Other packages use their normal sources. Wheel availability and resolution
 have not been verified here: confirm the actual result and compatible driver.
 Stop and resolve version/driver mismatches before collecting experimental
 data. The serving extra obtains torch through vLLM's dependency constraints.
+
+The Transformers 5.17.0 project pin is not an official RunPod runtime requirement.
+RunPod GPU bootstrap preserves the official vllm/vllm-openai:v0.26.0 image and
+checks transformers >=5.5.3 with packaging.version.Version. The operator-reported
+5.14.1 satisfies this check, and the actual version is recorded in
+runtime-packages.json. Do not apply the Colab installation flow to that runtime.
 
 ## 2. New CPU/mock unit tests first
 

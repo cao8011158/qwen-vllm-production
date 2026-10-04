@@ -242,13 +242,22 @@ experiment is added.
 
 ## Reproducibility and boundaries
 
-The supplied validated versions are pinned for vLLM 0.26.0,
+RunPod uses the official vllm/vllm-openai:v0.26.0 runtime unchanged.
+GPU bootstrap checks vLLM 0.26.0, compressed-tensors 0.17.0, torch 2.11.0 and
+CUDA 13.0 exactly, and checks transformers >=5.5.3 with packaging.version.Version
+in both runtime validation blocks. The operator-reported transformers 5.14.1
+meets that minimum. runtime-packages.json records the actual transformers version;
+bootstrap does not install, upgrade or downgrade the serving stack.
+
+The separately provisioned project environments retain the supplied pins in
+pyproject.toml and uv.lock for vLLM 0.26.0,
 compressed-tensors 0.17.0, transformers 5.17.0, lm-eval 0.4.13 and datasets
 4.8.5. Torch's public version remains constrained to 2.11.0. For Linux x86_64
-(Colab/RunPod), tool.uv.sources maps torch to the explicit pytorch-cu130 index
+project environments such as Colab, tool.uv.sources maps torch to the explicit pytorch-cu130 index
 at https://download.pytorch.org/whl/cu130; other packages retain their normal
 sources. The public-version constraint permits the +cu130 local version.
-Regenerate uv.lock with uv lock, then install with uv sync --locked.
+For those project environments, regenerate uv.lock with uv lock, then install
+with uv sync --locked. Do not use this installation flow inside the official RunPod image.
 No lock was generated or edited here. Manually verify that resolution selected
 torch 2.11.0+cu130, CUDA runtime 13.0 and a compatible driver before integration.
 Wheel availability and dependency compatibility were not checked over the
